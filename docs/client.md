@@ -16,7 +16,14 @@ The upstream Hyper client also disables cancelled-request retries. Each transpor
 defaults to two idle connections per host for two seconds. `Config::pool` accepts
 validated `PoolOptions` and applies them to both transports. Clones share bounded
 data/control/export admission and retained-byte budgets; separate clients have
-separate budgets and immutable bearer identities.
+separate budgets. Each client view keeps its own bearer identity.
+Use `client.with_bearer(new_token)?` to create a view for future operations with
+new bearer credentials while sharing the original connection pools, admission
+lanes and retained-byte budget. Existing clones and prepared executions keep
+their original credentials and deadlines. This validates token syntax and performs
+no network I/O or automatic replay. A client configured with JWT receiver
+constraints rejects this method; use `with_jwt_receiver(profile, token)` to
+replace those credentials with a newly reviewed receiver profile.
 Token acquisition/refresh belongs to the host; operations are never replayed by
 this library. Tokens are validated before network access and redacted from
 configuration debugging. Use `ANTALYA_TOKEN` for the examples; they reject username/password variables.
@@ -123,11 +130,14 @@ admitted response reads, exports, and control HTTP requests. Convenience command
 execution and raw upstream escape hatches retain their own total-deadline contract.
 Read inactivity reports `Cause::ReadTimeout`; total expiry reports `Cause::Timeout`.
 
-`Config::capacity_wait_timeout` optionally limits each full byte-reservation wait.
-Use `Duration::ZERO` to fail immediately when capacity is unavailable. With no
-setting, the wait lasts until buffers are released or the operation deadline.
+`Config::capacity_wait_timeout` limits each full byte-reservation wait to **one
+second by default**. Use `Duration::ZERO` to fail immediately when capacity is
+unavailable, or configure a longer wait when consumers deliberately retain
+batches. The total operation deadline still takes precedence. Setting a wait at
+least as long as the operation timeout restores waiting for the remaining
+operation budget.
 An exhausted wait reports `ErrorKind::LimitExceeded` with `Cause::CapacityTimeout`.
-No partial reservation is made. Cancel/retry can restart this optional wait budget,
+No partial reservation is made. Cancel/retry can restart this configured wait budget,
 but never extends the total operation deadline.
 
 The default 64 MiB shared budget limits **simultaneously retained** output; the

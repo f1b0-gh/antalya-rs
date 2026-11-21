@@ -48,7 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Run async operations in a Tokio runtime with I/O and timers enabled. Reuse the
 client: clones share connection pools, admission limits, and retained-byte
 budgets. Configured transports disable redirects, proxy discovery, and automatic
-request retries.
+request retries. `client.with_bearer(new_token)?` selects a new bearer for future
+operations while preserving those shared pools and limits; existing executions
+keep their original credentials. Receiver-aware JWT clients use
+`with_jwt_receiver` to preserve their reviewed credential constraints.
 
 ## Completion and server requirements
 
@@ -102,7 +105,11 @@ or reconciliation after a lost response.
 - [Host authorization](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/client.md#host-authorization) and
   [SQL helpers](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/client.md#sql-helpers): frozen requests and typed DDL builders.
 
-Keep `BudgetedBatch` wrappers while retaining their arrays. Accounting covers
+Keep `BudgetedBatch` wrappers while retaining their arrays. When retained output
+exhausts shared capacity, the next byte reservation waits at most one second by
+default, then reports `CapacityTimeout`. Configure `capacity_wait_timeout` for
+immediate failure or a longer wait; consume and drop batches to keep streaming.
+Accounting covers
 managed buffers; it is not a bound on total process memory. Raw transport and
 untracked batch APIs transfer validation and accounting responsibilities to the
 caller.

@@ -408,3 +408,49 @@ async fn error_prefix_progress_resets_read_timer_and_survives_cancelled_framed_p
         assert_eq!(error.cause(), Some(Cause::ServerResponse(Some(164))));
     }
 }
+
+#[tokio::test]
+async fn default_capacity_wait_bounds_same_query_retention_before_total_deadline() {
+    let server = Server::new(stream(2), 4, false, 200);
+    let client = AntalyaClient::new(bounded(Config::new(
+        server.endpoint.clone(),
+        Credentials::bearer("token").unwrap(),
+    )))
+    .unwrap();
+    let mut execution = client.fetch_arrow(query()).await.unwrap();
+    let retained = execution.next_batch().await.unwrap().unwrap();
+    let started = tokio::time::Instant::now();
+    let error = tokio::time::timeout(Duration::from_secs(3), execution.next_batch())
+        .await
+        .expect("default byte wait must finish well before the 60-second operation deadline")
+        .unwrap_err();
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert_eq!(error.cause(), Some(Cause::CapacityTimeout));
+    assert_eq!(error.kind(), ErrorKind::LimitExceeded);
+    assert_eq!(execution.outcome(), Outcome::Unknown);
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    drop(retained);
+    let mut next = client.fetch_arrow(query()).await.unwrap();
+    assert_eq!(next.next_batch().await.unwrap().unwrap().num_rows(), 2);
+}
+
+#[tokio::test]
+async fn explicit_longer_capacity_wait_allows_release_after_default_budget() {
+    let server = Server::new(stream(2), 4, false, 200);
+    let client = AntalyaClient::new(
+        bounded(Config::new(
+            server.endpoint.clone(),
+            Credentials::bearer("token").unwrap(),
+        ))
+        .capacity_wait_timeout(Duration::from_secs(3)),
+    )
+    .unwrap();
+    let mut execution = client.fetch_arrow(query()).await.unwrap();
+    let retained = execution.next_batch().await.unwrap().unwrap();
+    let release = async move {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        drop(retained);
+    };
+    let (next, ()) = tokio::join!(execution.next_batch(), release);
+    assert_eq!(next.unwrap().unwrap().num_rows(), 2);
+}
