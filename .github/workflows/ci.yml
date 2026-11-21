@@ -106,10 +106,10 @@ jobs:
         include:
           - name: query-log completion
             fixture: ''
-            tests: --test live_qualification --test admitted_transport --test admitted_ipc --test admitted_arrow --test prepared_command
+            tests: --test deployment_qualification --test live_qualification --test admitted_transport --test admitted_ipc --test admitted_arrow --test prepared_command
           - name: framed completion
             fixture: --framed
-            tests: --test in_band
+            tests: --test deployment_qualification --test in_band
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

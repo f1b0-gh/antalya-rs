@@ -299,7 +299,7 @@ impl Execution {
         error
     }
 
-    /// Compatibility API. Returned arrays are outside shared retained-byte accounting.
+    /// Untracked batch API. Returned arrays are outside shared retained-byte accounting.
     /// Per-batch/cumulative limits still apply. Prefer `next_batch` for bounded consumers.
     pub async fn next(&mut self) -> Result<Option<RecordBatch>, Error> {
         Ok(self.next_batch().await?.map(BudgetedBatch::into_untracked))

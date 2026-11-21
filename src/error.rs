@@ -79,7 +79,7 @@ impl fmt::Display for Cause {
 }
 impl std::error::Error for Cause {}
 
-/// Stable category shared by legacy errors and contextual diagnostics.
+/// Stable category shared by validation errors and contextual diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     InvalidEndpoint,
@@ -100,7 +100,7 @@ pub enum ErrorKind {
 }
 
 /// Errors contain no SQL, credentials, endpoint text or raw upstream messages.
-/// Legacy variants remain available; use [`Self::kind`] to classify all errors.
+/// Use [`Self::kind`] to classify all errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidEndpoint,

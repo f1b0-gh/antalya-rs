@@ -59,10 +59,20 @@ execution does not confirm remote cancellation.
 
 The default completion strategy needs permitted query-local logging settings,
 `SELECT` access to `system.query_log`, and routing of data and verification
-requests to the same server. It attempts `SYSTEM FLUSH LOGS query_log`, then polls for
-an execution-specific terminal record. `ObserveOnly` avoids the flush request
-when relying on asynchronous log publication. Explicit cancellation needs
+requests to the same server. It attempts `SYSTEM FLUSH LOGS query_log`, then polls
+for an execution-specific terminal record. Explicit cancellation needs
 `KILL QUERY` permission and terminal confirmation.
+
+| Deployment | Completion choice |
+|---|---|
+| Permitted logging settings and query-log SELECT access | `FlushFirst` (default); scoped flush reduces visibility delay when permitted |
+| Read-only queries with setting changes allowed (`readonly=2`) | `ObserveOnly`; allow for the server's log publication interval (7.5 seconds in the pinned fixtures) |
+| Framing-capable server and permitted request settings | `InBand` for high-level Arrow; completion arrives with the response, without a query-log lookup |
+| Settings locked by `readonly=1` | Tracked execution is unsupported; the client returns the refusal promptly |
+
+Query-log modes require backend affinity behind a load balancer. `InBand` avoids
+that requirement for successful high-level Arrow completion; explicit recovery
+and cancellation still use query-log observation.
 
 The default fixture targets `26.6.8.20004.altinityantalya`. The optional `InBand`
 strategy uses framed HTTP completion on a separate compatible server fixture;
@@ -72,6 +82,12 @@ values must use compatible Arrow crate versions. Project Dynamic/JSON values
 explicitly in SQL when an Arrow representation is needed.
 
 ## API guide
+
+Start with `AntalyaClient::fetch_arrow` and `Execution::next_batch`, or `export`
+for validated Arrow files. Prepared/admitted execution and recovery receipts are
+for applications that need durable intent, separate authorization of dispatch,
+or reconciliation after a lost response.
+
 
 - [Configuration and queries](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/client.md#configuration-and-credentials):
   bearer credentials, database selection, typed parameters, and transport policy.
