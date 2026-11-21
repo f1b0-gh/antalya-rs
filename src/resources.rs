@@ -59,13 +59,21 @@ pub(crate) struct Resources {
     retained_capacity: usize,
 }
 impl Resources {
+    #[cfg(test)]
     pub(crate) fn new(limits: &ResourceLimits) -> Result<Self, Error> {
+        Self::with_capacity_wait_timeout(limits, None)
+    }
+
+    pub(crate) fn with_capacity_wait_timeout(
+        limits: &ResourceLimits,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Self, Error> {
         limits.validate()?;
         Ok(Self {
             data: Admission::new(limits.max_active_queries, limits.max_queued_queries),
             control: Admission::new(limits.max_control_queries, limits.max_queued_queries),
             export: Admission::new(limits.max_export_tasks, limits.max_queued_queries),
-            bytes: bytes::BytePool::new(limits.max_retained_bytes),
+            bytes: bytes::BytePool::with_wait_timeout(limits.max_retained_bytes, timeout),
             retained_capacity: limits.max_retained_bytes,
         })
     }
@@ -217,7 +225,7 @@ mod tests {
         let short = Instant::now() + Duration::from_millis(2);
         assert_eq!(
             resources.reserve_bytes(1, short).await.unwrap_err().cause(),
-            Some(Cause::Timeout)
+            Some(Cause::CapacityTimeout)
         );
         drop(bytes);
         assert_eq!(
@@ -297,7 +305,10 @@ mod tests {
         assert!(matches!(waiter.as_mut().poll(&mut cx), Poll::Pending));
         drop(active);
         tokio::time::sleep_until(expires + Duration::from_millis(1)).await;
-        assert_eq!(waiter.await.unwrap_err().cause(), Some(Cause::Timeout));
+        assert_eq!(
+            waiter.await.unwrap_err().cause(),
+            Some(Cause::CapacityTimeout)
+        );
         assert_eq!(
             resources
                 .reserve_bytes(8, deadline())

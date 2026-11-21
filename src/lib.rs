@@ -22,6 +22,8 @@ mod memory;
 #[cfg(feature = "arrow")]
 mod metrics;
 #[cfg(feature = "arrow")]
+mod read_timeout;
+#[cfg(feature = "arrow")]
 mod resources;
 #[cfg(feature = "arrow")]
 pub use metrics::*;

@@ -338,6 +338,30 @@ prove server cancellation.
 
 ## Resource limits and diagnostics
 
+`Config::timeout` is the total operation deadline (60 seconds by default),
+including admission, caller processing between batches, and completion proof.
+Raise it for long-running queries. `Config::read_timeout` optionally bounds a
+pending streaming or control response read; successful reads reset that timer,
+and processing a returned batch does not consume it. Cancelling a borrowed
+stream poll preserves its read deadline. This applies to plain/framed Arrow,
+admitted response reads, exports, and control HTTP requests. Convenience command
+execution and raw upstream escape hatches retain their own total-deadline contract.
+Read inactivity reports `Cause::ReadTimeout`; total expiry reports `Cause::Timeout`.
+
+`Config::capacity_wait_timeout` optionally limits each full byte-reservation wait.
+Use `Duration::ZERO` to fail immediately when capacity is unavailable. With no
+setting, the wait lasts until buffers are released or the operation deadline.
+An exhausted wait reports `ErrorKind::LimitExceeded` with `Cause::CapacityTimeout`.
+No partial reservation is made. Cancel/retry can restart this optional wait budget,
+but never extends the total operation deadline.
+
+The default 64 MiB shared budget limits **simultaneously retained** output; the
+512 MiB per-query bound limits **cumulative** output. Consume and drop batches to
+stream more than the shared budget. Collecting all batches requires enough shared
+capacity for the collection plus the next full batch reservation (16 MiB by
+default). Wrapper clones retain the same charge until every clone is dropped.
+
+
 All configuration is validated by `AntalyaClient::new`. Zero queued operations
 is supported (fail immediately when active capacity is exhausted).
 

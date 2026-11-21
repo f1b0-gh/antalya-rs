@@ -295,14 +295,15 @@ impl AntalyaClient {
             metrics.queued += queued.elapsed();
             let (query, nonce, log_since) = tracked(self.scoped(&query));
             let mut cursor = self.fetch_bytes(&query, format)?;
+            let mut read_timer = crate::read_timeout::ReadTimer::new(self.config.read_timeout);
             let mut bytes = 0u64;
             let chunk_size = CHUNK_BYTES.min(self.resources.retained_capacity());
             loop {
                 let polled = Instant::now();
-                let next = timeout_at(deadline, cursor.next()).await;
+                let next = timeout_at(deadline, read_timer.wait(Phase::Data, cursor.next())).await;
                 metrics.data_poll += polled.elapsed();
                 let next = next
-                    .map_err(|_| Error::at(Phase::Data, Cause::Timeout))?
+                    .map_err(|_| Error::at(Phase::Data, Cause::Timeout))??
                     .map_err(|error| Error::from_upstream(Phase::Data, &error))?;
                 let Some(chunk) = next else {
                     break;

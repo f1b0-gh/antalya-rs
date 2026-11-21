@@ -308,7 +308,7 @@ async fn dropped_data_poll_keeps_byte_reservation_until_execution_drop() {
         .unwrap()
         .unwrap_err();
     assert_eq!(error.phase(), Some(Phase::Queue));
-    assert_eq!(error.cause(), Some(Cause::Timeout));
+    assert_eq!(error.cause(), Some(Cause::CapacityTimeout));
     assert_eq!(second.outcome(), Outcome::Unknown);
     assert_eq!(server.requests.load(Ordering::Acquire), 1);
     drop(first);

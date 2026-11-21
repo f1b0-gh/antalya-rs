@@ -124,6 +124,8 @@ pub struct Config {
     pub(crate) credentials: Credentials,
     pub(crate) database: Option<String>,
     pub(crate) timeout: Duration,
+    pub(crate) read_timeout: Option<Duration>,
+    pub(crate) capacity_wait_timeout: Option<Duration>,
     pub(crate) pool: PoolOptions,
     pub(crate) resources: ResourceLimits,
     pub(crate) execution_limits: ExecutionLimits,
@@ -138,6 +140,8 @@ impl Config {
             credentials,
             database: None,
             timeout: Duration::from_secs(60),
+            read_timeout: None,
+            capacity_wait_timeout: None,
             pool: PoolOptions::default(),
             resources: ResourceLimits::default(),
             execution_limits: ExecutionLimits::default(),
@@ -176,6 +180,22 @@ impl Config {
         self.timeout = timeout;
         self
     }
+    /// Bound each pending streaming/control network read, independently of the total operation
+    /// deadline. Successful reads reset this timer; processing returned output
+    /// does not consume it. Cancelling a pending read does not reset its timer.
+    /// Direct command execution and raw upstream escape hatches are excluded.
+    /// Disabled by default. Zero and unrepresentable durations are invalid.
+    pub fn read_timeout(mut self, timeout: Duration) -> Self {
+        self.read_timeout = Some(timeout);
+        self
+    }
+    /// Bound waiting for a full shared byte reservation. Zero refuses immediately
+    /// when insufficient capacity is available. Disabled by default, so retained
+    /// output can apply backpressure until release or the total operation deadline.
+    pub fn capacity_wait_timeout(mut self, timeout: Duration) -> Self {
+        self.capacity_wait_timeout = Some(timeout);
+        self
+    }
 }
 #[derive(Clone)]
 pub struct AntalyaClient {
@@ -211,6 +231,12 @@ impl AntalyaClient {
             || now.checked_add(config.pool.idle_timeout).is_none()
             || config.pool.max_idle_per_host > u32::MAX as usize
             || config.timeout.is_zero()
+            || config
+                .read_timeout
+                .is_some_and(|timeout| timeout.is_zero() || now.checked_add(timeout).is_none())
+            || config
+                .capacity_wait_timeout
+                .is_some_and(|timeout| now.checked_add(timeout).is_none())
             || std::time::Instant::now()
                 .checked_add(config.timeout)
                 .is_none()
@@ -263,7 +289,11 @@ impl AntalyaClient {
             (upstream, connector)
         };
         #[cfg(feature = "arrow")]
-        let resources = std::sync::Arc::new(crate::resources::Resources::new(&config.resources)?);
+        let resources =
+            std::sync::Arc::new(crate::resources::Resources::with_capacity_wait_timeout(
+                &config.resources,
+                config.capacity_wait_timeout,
+            )?);
         Ok(Self {
             config,
             http,
