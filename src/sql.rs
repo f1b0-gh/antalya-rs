@@ -1,6 +1,6 @@
-//! Small builders for the documented Antalya 26.6 syntax.
+//! Small builders for the qualified Antalya 26.6 and 26.8 syntax families.
 //! <https://docs.altinity.com/altinityantalya/antalya-quick-start-guide/working-with-hybrid-tables/>
-use crate::{Credentials, Endpoint, Error, QUALIFICATION_VERSION, Query};
+use crate::{Credentials, Endpoint, Error, Query};
 use std::collections::BTreeSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Feature {
@@ -17,11 +17,20 @@ pub struct Capabilities {
 impl Capabilities {
     /// For applications that obtain metadata themselves. Supplied observations
     /// must come from the intended server. Prefer `AntalyaClient::capabilities`.
+    ///
+    /// Supports canonical `26.6.patch.build.altinityantalya` versions from
+    /// `26.6.8.20004` and `26.8.patch.build.altinityantalya` versions from
+    /// `26.8.34.20001`, comparing patch and build numerically in that order.
+    /// These are compatibility families anchored at the qualified builds;
+    /// accepting a newer patch does not mean that exact build was tested.
+    /// Other release families, vendors and malformed versions are unsupported.
+    /// Every helper still requires its feature to be observed: the version alone
+    /// neither establishes feature availability nor grants permission to use it.
     pub fn from_observation(
         version: &str,
         features: impl IntoIterator<Item = Feature>,
     ) -> Result<Self, Error> {
-        if version != QUALIFICATION_VERSION {
+        if !supported_version(version) {
             return Err(Error::Unsupported);
         }
         Ok(Self {
@@ -40,6 +49,35 @@ impl Capabilities {
         }
     }
 }
+
+fn supported_version(version: &str) -> bool {
+    let Some(numbers) = version.strip_suffix(".altinityantalya") else {
+        return false;
+    };
+    let mut components = numbers.split('.').map(|component| {
+        if (component.len() > 1 && component.starts_with('0'))
+            || !component.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        component.parse::<u32>().ok()
+    });
+    let (Some(Some(26)), Some(Some(minor)), Some(Some(patch)), Some(Some(build)), None) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) else {
+        return false;
+    };
+    match minor {
+        6 => (patch, build) >= (8, 20004),
+        8 => (patch, build) >= (34, 20001),
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub struct Identifier(String);
 impl Identifier {

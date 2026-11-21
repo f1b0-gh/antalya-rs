@@ -409,8 +409,12 @@ This API prevents accidental mutation; it does not make arbitrary code in the sa
 catalogs, Hybrid tables and Parquet part export.
 Identifiers are quoted separately from values. Catalog credentials are sent in
 the SQL body, never URL parameters; treat catalog DDL as sensitive.
-`client.capabilities().await?` checks the exact qualified version and observed
-engines/settings before these helpers build a query. Use `execute_command` for
+`client.capabilities().await?` checks the supported Antalya release family and
+observed engines/settings before these helpers build a query. Supported families
+are 26.6 from 26.6.8.20004 and 26.8 from 26.8.34.20001; later patch/build versions
+in those families are accepted, while other families and vendors are refused.
+Version acceptance does not mean every later build has been tested, and each
+helper still requires its feature to be present. Use `execute_command` for
 these commands. Part export writes Parquet; Iceberg metadata updates and Puffin
 operations belong to a separate `iceberg-rust` integration.
 

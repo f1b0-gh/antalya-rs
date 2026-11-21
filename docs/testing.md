@@ -5,7 +5,8 @@
 ## Local checks
 
 Run from the repository root with Rust and Cargo installed.
-`rust-toolchain.toml` pins the tested toolchain to Rust 1.99.1:
+`rust-toolchain.toml` pins the tested toolchain to Rust 1.99.1. `Cargo.toml`
+declares the same supported compiler floor; older compilers are not qualified:
 
 ```sh
 cargo test --locked
