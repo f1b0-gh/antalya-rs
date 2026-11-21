@@ -849,6 +849,6 @@ async fn real_command_receipt_confirms_a_hot_copy_after_client_restart() -> Resu
         )?)
         .await;
     result?;
-    assert_eq!(cleanup?, Outcome::Succeeded);
+    assert_eq!(cleanup?.outcome, Outcome::Succeeded);
     Ok(())
 }

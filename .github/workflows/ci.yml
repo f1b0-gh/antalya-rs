@@ -76,7 +76,7 @@ jobs:
                       assert version == arrow_pin, f"{name} must use {arrow_pin}"
           arrow = [p for p in packages if p["name"].startswith("arrow-")]
           assert arrow and {p["version"] for p in arrow} == {arrow_pin[1:]}, "mixed or unqualified Arrow versions in Cargo.lock"
-          for name in ("clickhouse", "clickhouse-ext-arrow"):
+          for name in ("clickhouse",):
               pin = manifest["dependencies"][name]["version"]
               assert pin.startswith("="), f"{name} must have an exact qualified pin"
               resolved = [p["version"] for p in packages if p["name"] == name]

@@ -300,11 +300,11 @@ async fn ipc_file_and_stream_preserve_schema_values_and_empty_results() {
 async fn typed_parameters_match_both_transports_and_report_completion() {
     let client = client();
     let q = query("SELECT {s:String} AS s,{n:Int64} AS n,{u:UInt64} AS u,{b:Bool} AS b,{nil:Nullable(Int64)} AS nil")
-        .typed_parameter("s", Parameter::String("line\nquote'\\end".into())).unwrap()
-        .typed_parameter("n", Parameter::Int64(-7)).unwrap()
-        .typed_parameter("u", Parameter::UInt64(42)).unwrap()
-        .typed_parameter("b", Parameter::Bool(true)).unwrap()
-        .typed_parameter("nil", Parameter::Null).unwrap();
+        .parameter("s", Parameter::String("line\nquote'\\end".into())).unwrap()
+        .parameter("n", Parameter::Int64(-7)).unwrap()
+        .parameter("u", Parameter::UInt64(42)).unwrap()
+        .parameter("b", Parameter::Bool(true)).unwrap()
+        .parameter("nil", Parameter::Null).unwrap();
     let request = client.build_request(&q, Format::Json).unwrap();
     let response = reqwest::Client::new().execute(request).await.unwrap();
     assert!(response.status().is_success());
@@ -314,7 +314,7 @@ async fn typed_parameters_match_both_transports_and_report_completion() {
     assert!(value["data"][0]["nil"].is_null());
     // Reused IDs must never confuse terminal evidence with the preceding request.
     let mut execution = client.fetch_arrow(q).await.unwrap();
-    let batch = execution.next().await.unwrap().unwrap();
+    let batch = execution.next_batch().await.unwrap().unwrap();
     assert_eq!(
         batch
             .column(0)
@@ -334,7 +334,7 @@ async fn typed_parameters_match_both_transports_and_report_completion() {
         -7
     );
     assert!(batch.column(4).is_null(0));
-    assert!(execution.next().await.unwrap().is_none());
+    assert!(execution.next_batch().await.unwrap().is_none());
     assert_eq!(execution.outcome(), Outcome::Succeeded);
     assert_eq!(execution.rows_delivered(), 1);
 }
@@ -349,7 +349,7 @@ async fn cancellation_is_confirmed_and_failed_export_preserves_destination() {
         ))
         .await
         .unwrap();
-    assert!(execution.next().await.unwrap().is_some());
+    assert!(execution.next_batch().await.unwrap().is_some());
     assert_eq!(execution.cancel().await.unwrap(), Outcome::Cancelled);
     let work = work();
     let dest = work.path().join("keep.arrow");

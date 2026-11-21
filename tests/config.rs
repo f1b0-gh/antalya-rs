@@ -1,7 +1,6 @@
-use antalya_rs::{
-    AntalyaClient, AuthorizationContext, AuthorizedRequest, Config, Credentials, Endpoint, Format,
-    Parameter, Query,
-};
+use antalya_rs::{AntalyaClient, Config, Credentials, Endpoint, Format, Parameter, Query};
+#[cfg(feature = "arrow")]
+use antalya_rs::{AuthorizationContext, AuthorizedRequest};
 use std::time::Duration;
 fn endpoint() -> Endpoint {
     Endpoint::parse("http://127.0.0.1:8123").unwrap()
@@ -22,11 +21,11 @@ fn typed_values_and_database_are_explicit() {
     .unwrap()
     .database("analytics")
     .unwrap()
-    .typed_parameter("n", Parameter::Int64(-42))
+    .parameter("n", Parameter::Int64(-42))
     .unwrap()
-    .typed_parameter("b", Parameter::Bool(true))
+    .parameter("b", Parameter::Bool(true))
     .unwrap()
-    .typed_parameter("v", Parameter::Null)
+    .parameter("v", Parameter::Null)
     .unwrap();
     let c = AntalyaClient::new(
         Config::new(endpoint(), Credentials::bearer("token").unwrap())
@@ -55,18 +54,21 @@ fn commands_have_no_format_and_frozen_request_keeps_binding() {
         r.body().unwrap().as_bytes().unwrap(),
         b"CREATE DATABASE demo"
     );
-    let frozen = AuthorizedRequest::new(
-        q,
-        endpoint(),
-        Format::Json,
-        AuthorizationContext {
-            receipt_id: "receipt".into(),
-            expected_principal: "reader".into(),
-        },
-    )
-    .unwrap();
-    assert_eq!(frozen.query_id(), "ddl-1");
-    assert_eq!(frozen.expected_principal(), "reader");
+    #[cfg(feature = "arrow")]
+    {
+        let frozen = AuthorizedRequest::new(
+            q,
+            endpoint(),
+            Format::Json,
+            AuthorizationContext {
+                receipt_id: "receipt".into(),
+                expected_principal: "reader".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(frozen.query_id(), "ddl-1");
+        assert_eq!(frozen.expected_principal(), "reader");
+    }
 }
 #[test]
 fn bearer_tokens_follow_rfc6750_and_do_not_leak() {

@@ -59,7 +59,7 @@ async fn valid_ipc_and_eof_without_terminal_evidence_remain_unknown() {
         .fetch_arrow(Query::new("SELECT 1", "unknown-1").unwrap())
         .await
         .unwrap();
-    assert!(execution.next().await.is_err());
+    assert!(execution.next_batch().await.is_err());
     assert_eq!(execution.outcome(), Outcome::Unknown);
     assert!(execution.schema().is_some());
     assert_eq!(execution.query_id(), "unknown-1");

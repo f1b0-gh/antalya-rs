@@ -352,6 +352,7 @@ impl AntalyaClient {
     }
 }
 /// Host authorization metadata. This crate does not issue, validate or refresh grants.
+#[cfg(feature = "arrow")]
 pub struct AuthorizationContext {
     pub receipt_id: String,
     pub expected_principal: String,
@@ -360,12 +361,14 @@ pub struct AuthorizationContext {
 /// parameters, limits, filters, database, snapshot and destination.
 /// The host must revalidate expiry/revocation immediately before execution.
 /// There is deliberately no conversion back to a mutable Query.
+#[cfg(feature = "arrow")]
 pub struct AuthorizedRequest {
     pub(crate) query: Query,
     pub(crate) endpoint: Endpoint,
     pub(crate) format: Format,
     pub(crate) authorization: AuthorizationContext,
 }
+#[cfg(feature = "arrow")]
 impl AuthorizedRequest {
     pub fn new(
         query: Query,
@@ -398,13 +401,5 @@ impl AuthorizedRequest {
     }
     pub fn expected_principal(&self) -> &str {
         &self.authorization.expected_principal
-    }
-    pub fn build_request(
-        &self,
-        client: &reqwest::Client,
-        credentials: &Credentials,
-    ) -> Result<reqwest::Request, Error> {
-        self.query
-            .build_request(client, &self.endpoint, credentials, self.format)
     }
 }

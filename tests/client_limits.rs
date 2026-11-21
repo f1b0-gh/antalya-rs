@@ -45,7 +45,7 @@ async fn default_execution_rejects_excess_rows_before_delivery() {
         .await
         .unwrap();
     assert!(
-        execution.next().await.is_err(),
+        execution.next_batch().await.is_err(),
         "oversized result must not be delivered"
     );
     task.join().unwrap();

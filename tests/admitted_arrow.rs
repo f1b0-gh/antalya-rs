@@ -680,7 +680,7 @@ async fn live_expired_data_credential_uses_separately_authorized_completion() ->
                 "SELECT count() AS n FROM system.query_log WHERE query_id={id:String}",
                 uuid::Uuid::new_v4().to_string(),
             )?
-            .typed_parameter(
+            .parameter(
                 "id",
                 antalya_rs::Parameter::String(refused_receipt.query_id().to_owned()),
             )?,

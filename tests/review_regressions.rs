@@ -203,7 +203,7 @@ async fn command_settings_refusal_retains_diagnostics_without_polling() {
     )
     .unwrap();
     let report = client
-        .execute_command_report(Query::new("CREATE DATABASE refused", "command-refusal").unwrap())
+        .execute_command(Query::new("CREATE DATABASE refused", "command-refusal").unwrap())
         .await
         .unwrap();
     assert_eq!(report.outcome, Outcome::Unknown);

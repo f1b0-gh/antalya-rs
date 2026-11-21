@@ -163,7 +163,7 @@ impl PreparedExecution {
                 let mut request = execution
                     .client
                     .build_request(&execution.query, Format::ArrowStream)?;
-                // Same reserved wire profile as clickhouse-ext-arrow::fetch_arrow.
+                // Same uncompressed wire profile as the high-level Arrow reader.
                 request
                     .url_mut()
                     .query_pairs_mut()
