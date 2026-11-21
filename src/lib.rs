@@ -1,4 +1,4 @@
-//! Thin Antalya integration over upstream HTTP clients.
+//! Antalya HTTP and Arrow client with explicit completion and resource limits.
 //!
 //! Authorization belongs to the host. SQL and settings must already be approved
 //! before building a request. Receiving a batch does not establish query success.

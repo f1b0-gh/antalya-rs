@@ -2,6 +2,10 @@
 
 [Getting started](../README.md) · [Testing](testing.md)
 
+For ordinary queries, start with configuration, results, [resource limits](#resource-limits-and-diagnostics)
+and [exports](#validated-ipc-exports). The prepared/admitted APIs below serve
+hosts that journal intent and authorize dispatch and recovery separately.
+
 ## Configuration and credentials
 
 `Config` shares endpoint, bearer identity, database and operation timeout across
@@ -15,7 +19,7 @@ data/control/export admission and retained-byte budgets; separate clients have
 separate budgets and immutable bearer identities.
 Token acquisition/refresh belongs to the host; operations are never replayed by
 this library. Tokens are validated before network access and redacted from
-configuration debugging. Use `ANTALYA_TOKEN` for the examples; they reject legacy username/password variables.
+configuration debugging. Use `ANTALYA_TOKEN` for the examples; they reject username/password variables.
 
 ## Queries and parameters
 
@@ -87,6 +91,114 @@ observes the matching `system.processes` entry. `cancel()` issues a synchronous
 KILL scoped to both ID and marker and confirms a cancellation exception in the
 query log. It needs KILL permission. Dropping a cursor is not confirmed cancellation.
 
+## Validated IPC exports
+
+`client.export(query, Format::Arrow | Format::ArrowStream, path, options)` writes
+to private temporary storage on the destination filesystem, enforces `max_bytes`,
+validates each batch with the corresponding arrow-rs reader, verifies completion,
+then publishes atomically. `Overwrite::Forbid` is the default; `Replace` replaces
+only after all checks. Filesystem creation, writes, validation, synchronization,
+publication and temporary cleanup run on bounded blocking workers. A two-message
+queue carries copies of at most 64 KiB, charged before allocation; a slow worker
+backpressures the producer. Validation reserves a maximum-batch allowance and
+checks each decoded batch and cumulative totals.
+
+Failure or cancellation before the atomic commit decision preserves the
+destination. A commit that wins before cancellation may finish its rename after
+the future is dropped. Running syscalls cannot be interrupted; detached cleanup
+retains its export permit until it actually finishes. Deadlines are checked before
+commit, but cannot undo an already started publication syscall. Publication gives
+atomic visibility, not power-loss durability. Dropping an export future does not
+prove server cancellation.
+
+## Resource limits and diagnostics
+
+`Config::timeout` is the total operation deadline (60 seconds by default),
+including admission, caller processing between batches, and completion proof.
+Raise it for long-running queries. `Config::read_timeout` optionally bounds a
+pending streaming or control response read; successful reads reset that timer,
+and processing a returned batch does not consume it. Cancelling a borrowed
+stream poll preserves its read deadline. This applies to plain/framed Arrow,
+admitted response reads, exports, and control HTTP requests. Convenience command
+execution and raw upstream escape hatches retain their own total-deadline contract.
+Read inactivity reports `Cause::ReadTimeout`; total expiry reports `Cause::Timeout`.
+
+`Config::capacity_wait_timeout` optionally limits each full byte-reservation wait.
+Use `Duration::ZERO` to fail immediately when capacity is unavailable. With no
+setting, the wait lasts until buffers are released or the operation deadline.
+An exhausted wait reports `ErrorKind::LimitExceeded` with `Cause::CapacityTimeout`.
+No partial reservation is made. Cancel/retry can restart this optional wait budget,
+but never extends the total operation deadline.
+
+The default 64 MiB shared budget limits **simultaneously retained** output; the
+512 MiB per-query bound limits **cumulative** output. Consume and drop batches to
+stream more than the shared budget. Collecting all batches requires enough shared
+capacity for the collection plus the next full batch reservation (16 MiB by
+default). Wrapper clones retain the same charge until every clone is dropped.
+
+
+All configuration is validated by `AntalyaClient::new`. Zero queued operations
+is supported (fail immediately when active capacity is exhausted).
+
+| Configuration | Defaults | Scope |
+|---|---|---|
+| `ResourceLimits` | 16 active data, 64 queued per lane, 4 control, 2 export tasks | Shared by clones; queue waits use the operation deadline |
+| `max_retained_bytes` | 64 MiB | Accounted Arrow batches and queued export copies/validation reservation |
+| `ExecutionLimits` | 1M rows, 65536 batches, 512 MiB cumulative, 16 MiB per batch | Each configured stream/export; export also enforces its wire-byte limit |
+| `PoolOptions` | 2 idle connections/host, 2s idle lifetime | Each of the two transports; not an active-query limit |
+
+Byte reservations are acquired in full. A waiting large request does not reserve
+partial capacity or block a smaller request that can make progress. Byte admission
+is not FIFO: sustained smaller requests can delay a larger one until its deadline.
+
+Admitted IPC and Arrow readers distinguish internally retained frames, schemas,
+and dictionaries from caller-retained output. Waiting for callers to drop output
+applies backpressure. If a nested reservation cannot fit even after all external
+output is released, the reader returns a typed `Cause::Capacity` instead of waiting
+on other internal allocations. This can conservatively refuse a reader even when
+a peer might later free memory. The refused reader discards its buffered data and
+remains unconfirmed; it does not replay the query or issue implicit controls.
+Dictionary replacement and deltas release internal ownership of old backing
+buffers while earlier returned batches keep their own byte charges.
+
+`BudgetedBatch` dereferences to `RecordBatch`. Keep the wrapper for as long as its
+arrays are retained; wrapper clones share a lease. The reservation also survives
+cancellation of a pending `next_batch()` future, like the upstream cursor's partial
+IPC state. Dropping the execution releases admission and pending buffers, while
+already returned wrappers retain their leases. EOF proof can be resumed after a
+cancelled poll without mistaking decoder failure or discarded data for success.
+
+The untracked `next()` API and `BudgetedBatch::into_untracked()` explicitly transfer buffer
+accounting responsibility to the caller; cloning raw arrays out of a wrapper also
+bypasses its lifetime contract. The high-level cursor validates bounded IPC envelopes and layouts before Arrow
+conversion, then checks decoded batch sizes before delivery. Accounting does not
+bound every upstream allocation, transport buffer or memory retained through
+escape hatches, and is not a process-RSS guarantee. The separately admitted
+decoder also reserves capacity for schema conversion and dictionary growth.
+
+`Execution::metrics()` reports admission wait, identity, upstream poll time, first
+batch/EOF offsets, terminal/flush/observation times, poll/sleep counts, elapsed total
+and typed failures. `CommandReport` and `ExportReport` provide their metrics too;
+exports add write/validation/sync/publication clocks. The high-level Arrow path separately measures HTTP body/request wait and
+synchronous Arrow decoding; other uninstrumented paths keep these fields `None`. Phases can overlap;
+do not sum them into a fabricated total or equate first provisional batch with
+confirmed result delivery. Metrics and errors contain no SQL, token or endpoint.
+
+Use `Error::kind()` for category matching, `phase()`/`cause()` for diagnostics and
+`std::error::Error::source()` for the sanitized typed source. Existing unit variants
+remain available, but runtime errors may now be contextual. HTTP status, numeric
+server code when available, I/O kind, malformed JSON, Arrow decoding, capacity,
+timeout and invalid proof remain distinguishable without retaining raw server
+messages. Known codes include a static explanation, such as unknown table,
+read-only setting refusal or insufficient privileges. Raw messages can contain
+SQL and credentials and are not retained. Use the query ID to investigate in
+access-controlled server logs.
+
+Setting/authentication/privilege refusals return promptly instead of waiting for
+a terminal record that the server may never create. Reports retain the numeric
+code and an Unknown outcome; a server response alone does not prove remote
+completion or authorize replay.
+
 ## Recovery and prepared execution
 
 `Execution::confirm_termination` rechecks the original query ID, random marker and
@@ -156,7 +268,7 @@ Tokens are at most 8 KiB, decoded headers 1 KiB, decoded payloads 4 KiB and each
 top-level object at most 32 distinct members. Duplicate members, unsupported
 critical extensions and ambiguous expiry types are refused with typed errors.
 Parsing uses fixed decode buffers and bounded selected fields, with no per-batch
-claim decoding; this is not a measured RSS improvement. The original unguarded
+claim decoding. The original unguarded
 `admit`, `admit_ipc` and `admit_arrow` APIs retain their existing contracts.
 
 The pinned live fixture exercises a valid signed credential, rejects a corrupted
@@ -179,7 +291,7 @@ Each returned payload is
 detached once from Hyper's potentially larger allocation; clones then share the
 payload and lease. Keep the wrapper while retaining its bytes. Connection buffers,
 TLS, allocation metadata and subsequent decoding are separate from that payload
-budget; these limits are not a measured RSS bound or a performance claim.
+budget. See [resource limits](#resource-limits-and-diagnostics) for the accounting boundary.
 The raw path does not apply decoded row, batch-count or Arrow batch-size limits;
 the decoder must enforce them before accepting results.
 
@@ -197,7 +309,7 @@ Each frame has at most 64 KiB of metadata, `max_batch_bytes` of encoded body and
 eight prefix bytes. The full frame reservation precedes buffering and shrinks to
 the retained vector capacity when returned. FlatBuffers verification also bounds
 depth (32), tables (4,096) and apparent size (256 KiB). The ready transport requests
-the same uncompressed Arrow profile as the legacy cursor; framing refuses any
+the same uncompressed Arrow profile as the high-level cursor; framing refuses any
 compressed batch before decompression. Negative/oversized lengths, invalid buffer
 ranges, missing/repeated schemas, incomplete frames and trailing bytes after EOS
 fail with typed errors. Metadata failures preserve the original FlatBuffers cause.
@@ -205,9 +317,8 @@ fail with typed errors. Metadata failures preserve the original FlatBuffers caus
 Frames are **not decoded batches**. `declared_rows()` checks untrusted declarations
 against row/batch limits; it is not a verified row count. Schema semantics, array
 validation, decoded allocation/dictionary bounds and completion verification remain
-decoder/host responsibilities. The frame copy and existing detached wire copy are
-explicit costs; no throughput or process-memory improvement is claimed. Reading
-frames never issues terminal-control queries.
+decoder/host responsibilities. Framing copies encoded bytes after the transport
+detaches its payload. Reading frames never issues terminal-control queries.
 
 ## Admitted Arrow decoding
 
@@ -228,8 +339,7 @@ array lengths and accumulated dictionary lengths are additionally bounded to
 eight times that value, so a possible logical-null bitmap cannot exceed the byte
 bound. Returned batches include a conservative schema memory charge. Cumulative
 decoded bytes, rows and batches are checked independently of wire bytes. This
-accounting can double-charge shared buffers; it is not a zero-copy, throughput
-or process-RSS claim. Retaining batch clones keeps their reservations alive;
+accounting can double-charge shared buffers. Retaining batch clones keeps their reservations alive;
 cancelled borrowed reads preserve pending frames and resume without replay.
 `shared_schema()` clones only the schema Arc; an independent owner must charge
 `schema_bytes()` while retaining it, including for empty results. That escape
@@ -312,117 +422,10 @@ The `execute_command_report` API has no pre-dispatch receipt or retained owner.
 Command preparation bounds SQL and query-ID lengths and uses shared admission;
 the application must bound parameter/setting counts and values, database names,
 and generic bearer-token sizes. Request construction can copy and escape these
-inputs. These limits do not bound process RSS. The ready-transport path owns one
+inputs. The ready-transport path owns one
 connection task, aborted with its owner, just like prepared Arrow. Underlying request
 serialization allocations remain governed by the existing client contract.
 
-## Validated IPC exports
-
-`client.export(query, Format::Arrow | Format::ArrowStream, path, options)` writes
-to private temporary storage on the destination filesystem, enforces `max_bytes`,
-validates each batch with the corresponding arrow-rs reader, verifies completion,
-then publishes atomically. `Overwrite::Forbid` is the default; `Replace` replaces
-only after all checks. Filesystem creation, writes, validation, synchronization,
-publication and temporary cleanup run on bounded blocking workers. A two-message
-queue carries copies of at most 64 KiB, charged before allocation; a slow worker
-backpressures the producer. Validation reserves a maximum-batch allowance and
-checks each decoded batch and cumulative totals.
-
-Failure or cancellation before the atomic commit decision preserves the
-destination. A commit that wins before cancellation may finish its rename after
-the future is dropped. Running syscalls cannot be interrupted; detached cleanup
-retains its export permit until it actually finishes. Deadlines are checked before
-commit, but cannot undo an already started publication syscall. Publication gives
-atomic visibility, not power-loss durability. Dropping an export future does not
-prove server cancellation.
-
-## Resource limits and diagnostics
-
-`Config::timeout` is the total operation deadline (60 seconds by default),
-including admission, caller processing between batches, and completion proof.
-Raise it for long-running queries. `Config::read_timeout` optionally bounds a
-pending streaming or control response read; successful reads reset that timer,
-and processing a returned batch does not consume it. Cancelling a borrowed
-stream poll preserves its read deadline. This applies to plain/framed Arrow,
-admitted response reads, exports, and control HTTP requests. Convenience command
-execution and raw upstream escape hatches retain their own total-deadline contract.
-Read inactivity reports `Cause::ReadTimeout`; total expiry reports `Cause::Timeout`.
-
-`Config::capacity_wait_timeout` optionally limits each full byte-reservation wait.
-Use `Duration::ZERO` to fail immediately when capacity is unavailable. With no
-setting, the wait lasts until buffers are released or the operation deadline.
-An exhausted wait reports `ErrorKind::LimitExceeded` with `Cause::CapacityTimeout`.
-No partial reservation is made. Cancel/retry can restart this optional wait budget,
-but never extends the total operation deadline.
-
-The default 64 MiB shared budget limits **simultaneously retained** output; the
-512 MiB per-query bound limits **cumulative** output. Consume and drop batches to
-stream more than the shared budget. Collecting all batches requires enough shared
-capacity for the collection plus the next full batch reservation (16 MiB by
-default). Wrapper clones retain the same charge until every clone is dropped.
-
-
-All configuration is validated by `AntalyaClient::new`. Zero queued operations
-is supported (fail immediately when active capacity is exhausted).
-
-| Configuration | Defaults | Scope |
-|---|---|---|
-| `ResourceLimits` | 16 active data, 64 queued per lane, 4 control, 2 export tasks | Shared by clones; queue waits use the operation deadline |
-| `max_retained_bytes` | 64 MiB | Accounted Arrow batches and queued export copies/validation reservation |
-| `ExecutionLimits` | 1M rows, 65536 batches, 512 MiB cumulative, 16 MiB per batch | Each configured stream/export; export also enforces its wire-byte limit |
-| `PoolOptions` | 2 idle connections/host, 2s idle lifetime | Each of the two transports; not an active-query limit |
-
-Byte reservations are acquired in full. A waiting large request does not reserve
-partial capacity or block a smaller request that can make progress. Byte admission
-is not FIFO: sustained smaller requests can delay a larger one until its deadline.
-
-Admitted IPC and Arrow readers distinguish internally retained frames, schemas,
-and dictionaries from caller-retained output. Waiting for callers to drop output
-applies backpressure. If a nested reservation cannot fit even after all external
-output is released, the reader returns a typed `Cause::Capacity` instead of waiting
-on other internal allocations. This can conservatively refuse a reader even when
-a peer might later free memory. The refused reader discards its buffered data and
-remains unconfirmed; it does not replay the query or issue implicit controls.
-Dictionary replacement and deltas release internal ownership of old backing
-buffers while earlier returned batches keep their own byte charges.
-
-`BudgetedBatch` dereferences to `RecordBatch`. Keep the wrapper for as long as its
-arrays are retained; wrapper clones share a lease. The reservation also survives
-cancellation of a pending `next_batch()` future, like the upstream cursor's partial
-IPC state. Dropping the execution releases admission and pending buffers, while
-already returned wrappers retain their leases. EOF proof can be resumed after a
-cancelled poll without mistaking decoder failure or discarded data for success.
-
-Legacy `next()` and `BudgetedBatch::into_untracked()` explicitly transfer buffer
-accounting responsibility to the caller; cloning raw arrays out of a wrapper also
-bypasses its lifetime contract. The high-level cursor validates bounded IPC envelopes and layouts before Arrow
-conversion, then checks decoded batch sizes before delivery. Accounting does not
-bound every upstream allocation, transport buffer or memory retained through
-escape hatches, and is not a process-RSS guarantee. The separately admitted
-decoder also reserves capacity for schema conversion and dictionary growth.
-
-`Execution::metrics()` reports admission wait, identity, upstream poll time, first
-batch/EOF offsets, terminal/flush/observation times, poll/sleep counts, elapsed total
-and typed failures. `CommandReport` and `ExportReport` provide their metrics too;
-exports add write/validation/sync/publication clocks. The high-level Arrow path separately measures HTTP body/request wait and
-synchronous Arrow decoding; other uninstrumented paths keep these fields `None`. Phases can overlap;
-do not sum them into a fabricated total or equate first provisional batch with
-confirmed result delivery. Metrics and errors contain no SQL, token or endpoint.
-
-Use `Error::kind()` for category matching, `phase()`/`cause()` for diagnostics and
-`std::error::Error::source()` for the sanitized typed source. Existing unit variants
-remain available, but runtime errors may now be contextual. HTTP status, numeric
-server code when available, I/O kind, malformed JSON, Arrow decoding, capacity,
-timeout and invalid proof remain distinguishable without retaining raw server
-messages. Known codes include a static explanation, such as unknown table,
-read-only setting refusal or insufficient privileges. Raw messages can contain
-SQL and credentials and are not retained. Use the query ID to investigate in
-access-controlled server logs.
-
-Setting/authentication/privilege refusals return promptly instead of waiting for
-a terminal record that the server may never create. Reports retain the numeric
-code and an Unknown outcome; a server response alone does not prove remote
-completion or authorize replay.
 
 ## Raw transport escape hatches
 
@@ -448,7 +451,11 @@ This API prevents accidental mutation; it does not make arbitrary code in the sa
 `sql::{Catalog, Hybrid, ExportPart}` provide narrow typed builders for REST
 catalogs, Hybrid tables and Parquet part export.
 Identifiers are quoted separately from values. Catalog credentials are sent in
-the SQL body, never URL parameters; treat catalog DDL as sensitive.
+the SQL body, never URL parameters; treat catalog DDL and persisted server metadata
+as sensitive. Both pinned fixtures test actual Catalog creation and one failure
+path: the credential is absent from HTTP responses, SQL-visible metadata and
+query-log fields. See [qualification coverage](testing.md#default-server-fixture)
+for the exact checks; the server must retain connection credentials to use them.
 `client.capabilities().await?` checks the supported Antalya release family and
 observed engines/settings before these helpers build a query. Supported families
 are 26.6 from 26.6.8.20004 and 26.8 from 26.8.34.20001; later patch/build versions
@@ -490,20 +497,19 @@ avoiding an intermediate JSON string and object. Escaped, reordered or other
 representations keep the existing duplicate-rejecting parser. A malformed
 canonical-looking payload can incur one extra bounded decode attempt. All
 line/wire/packet limits, terminal ordering, deadlines, IPC checks and final
-proof remain active. This reduces parser allocations; it does not remove the
-server's base64 encoding cost or imply a universal query-latency improvement.
+proof remain active. Base64 encoding still runs on the server; use the profiling
+example to measure the complete operation in your deployment.
 
 The default terminal policy remains `FlushFirst`. Antalya 26.6.8.20004 lacks
 `framing_output_format`; use a separately qualified compatible server before
 selecting `InBand`. Command and admitted transports reject this mode before dispatch. Explicit cancellation/recovery observations are
 separate operations and may still consult the query log. Background query logging
-is not disabled or made free by transporting the success proof with the results.
+remains enabled.
 
 The measured high-level decoder also validates bounded FlatBuffer metadata,
 record/dictionary layouts and dictionary growth before Arrow conversion. It
 requests uncompressed Arrow IPC and refuses compressed bodies before their
-expansion; exported-file codecs keep their separate contract. These checks and
-the configured accounting budgets are not a hard process-RSS guarantee.
+expansion; exported-file codecs keep their separate contract.
 
 
 See [testing](testing.md) for the pinned server fixtures and reproducible commands.
