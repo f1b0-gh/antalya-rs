@@ -31,6 +31,7 @@ pub(super) struct MeasuredCursor {
     metrics: Measurements,
     wire_limit: u64,
     ended: bool,
+    read_timer: crate::read_timeout::ReadTimer,
 }
 impl MeasuredCursor {
     pub(super) fn new(client: &AntalyaClient, query: &Query) -> Result<Self, Error> {
@@ -57,6 +58,7 @@ impl MeasuredCursor {
                 .saturating_mul(2)
                 .saturating_add(1_048_576),
             ended: false,
+            read_timer: crate::read_timeout::ReadTimer::new(client.config.read_timeout),
         })
     }
     pub(super) fn schema(&self) -> Option<SchemaRef> {
@@ -95,8 +97,11 @@ impl MeasuredCursor {
             }
             let next = match &mut self.source {
                 Source::Plain(cursor) => {
-                    let result =
-                        crate::metrics::timed(&mut self.metrics.transfer, cursor.next()).await;
+                    let result = crate::metrics::timed(
+                        &mut self.metrics.transfer,
+                        self.read_timer.wait(Phase::Data, cursor.next()),
+                    )
+                    .await?;
                     self.metrics.wire_bytes = cursor.received_bytes();
                     result.map_err(|e| Error::from_upstream(Phase::Data, &e))?
                 }

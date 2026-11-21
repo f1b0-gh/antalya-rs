@@ -16,9 +16,18 @@ pub(super) struct BytePool {
     capacity: usize,
     state: Mutex<State>,
     changed: Notify,
+    wait_timeout: Option<std::time::Duration>,
 }
 impl BytePool {
+    #[cfg(test)]
     pub(super) fn new(capacity: usize) -> Arc<Self> {
+        Self::with_wait_timeout(capacity, None)
+    }
+
+    pub(super) fn with_wait_timeout(
+        capacity: usize,
+        wait_timeout: Option<std::time::Duration>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             capacity,
             state: Mutex::new(State {
@@ -26,6 +35,7 @@ impl BytePool {
                 internal: 0,
             }),
             changed: Notify::new(),
+            wait_timeout,
         })
     }
     fn state(&self) -> MutexGuard<'_, State> {
@@ -42,16 +52,29 @@ impl BytePool {
         holds_internal: bool,
         deadline: Instant,
     ) -> Result<ByteLease, Error> {
+        super::check_deadline(deadline)?;
         if bytes > self.capacity {
             return Err(Error::at(Phase::Queue, Cause::LimitExceeded));
         }
+        let wait_deadline = self
+            .wait_timeout
+            .map(|timeout| {
+                Instant::now()
+                    .checked_add(timeout)
+                    .ok_or(Error::InvalidSetting)
+            })
+            .transpose()?
+            .map_or(deadline, |wait| wait.min(deadline));
+        let mut waited = false;
         loop {
             // Register before examining accounting to avoid a release between
             // the check and registration becoming a lost wakeup.
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            super::check_deadline(deadline)?;
+            if waited && Instant::now() >= wait_deadline {
+                return Err(Error::at(Phase::Queue, Cause::CapacityTimeout));
+            }
             let lease = {
                 let mut state = self.state();
                 if bytes <= state.available {
@@ -75,14 +98,24 @@ impl BytePool {
                 }
             };
             if let Some(lease) = lease {
-                super::check_deadline(deadline)?;
+                if Instant::now() >= deadline {
+                    return Err(Error::at(
+                        Phase::Queue,
+                        if waited {
+                            Cause::CapacityTimeout
+                        } else {
+                            Cause::Timeout
+                        },
+                    ));
+                }
                 // New internal ownership can make another nested wait impossible.
                 self.changed.notify_waiters();
                 return Ok(lease);
             }
-            tokio::time::timeout_at(deadline, changed)
+            waited = true;
+            tokio::time::timeout_at(wait_deadline, changed)
                 .await
-                .map_err(|_| Error::at(Phase::Queue, Cause::Timeout))?;
+                .map_err(|_| Error::at(Phase::Queue, Cause::CapacityTimeout))?;
         }
     }
 }

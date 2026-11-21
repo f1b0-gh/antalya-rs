@@ -12,6 +12,7 @@ type Pending = Pin<Box<dyn Future<Output = Result<Response, reqwest::Error>> + S
 pub(super) struct FramedSource {
     pending: Option<Pending>,
     response: Option<Response>,
+    pending_error: Option<Pin<Box<dyn Future<Output = Error> + Send>>>,
     query_id: String,
     chunk: Bytes,
     offset: usize,
@@ -21,6 +22,7 @@ pub(super) struct FramedSource {
     terminal: Option<Progress>,
     ended: bool,
     packets: u64,
+    read_timer: crate::read_timeout::ReadTimer,
 }
 impl FramedSource {
     pub(super) fn new(client: &AntalyaClient, query: &Query) -> Result<Self, Error> {
@@ -41,6 +43,7 @@ impl FramedSource {
         Ok(Self {
             pending: Some(Box::pin(async move { http.execute(request).await })),
             response: None,
+            pending_error: None,
             query_id: query.id,
             chunk: Bytes::new(),
             offset: 0,
@@ -61,6 +64,7 @@ impl FramedSource {
             terminal: None,
             ended: false,
             packets: 0,
+            read_timer: crate::read_timeout::ReadTimer::new(client.config.read_timeout),
         })
     }
     pub(super) fn terminal(&self) -> Option<Progress> {
@@ -74,25 +78,41 @@ impl FramedSource {
             return Ok(None);
         }
         if let Some(pending) = self.pending.as_mut() {
-            let response = crate::metrics::timed(&mut metrics.transfer, pending)
-                .await
-                .map_err(|e| Error::from_reqwest(Phase::Data, &e))?;
+            let response = crate::metrics::timed(
+                &mut metrics.transfer,
+                self.read_timer.wait(Phase::Data, pending),
+            )
+            .await?
+            .map_err(|e| Error::from_reqwest(Phase::Data, &e))?;
             self.pending = None;
             if !response.status().is_success() {
-                return Err(Error::at(
+                self.pending_error = Some(Box::pin(crate::execution::server_response_error(
+                    response,
                     Phase::Data,
-                    Cause::HttpStatus(response.status().as_u16()),
-                ));
+                    std::mem::replace(
+                        &mut self.read_timer,
+                        crate::read_timeout::ReadTimer::new(None),
+                    ),
+                )));
+            } else {
+                validate_headers(response.headers(), &self.query_id)?;
+                self.response = Some(response);
             }
-            validate_headers(response.headers(), &self.query_id)?;
-            self.response = Some(response);
+        }
+        if let Some(pending_error) = self.pending_error.as_mut() {
+            let error = pending_error.await;
+            self.pending_error = None;
+            return Err(error);
         }
         loop {
             if self.offset == self.chunk.len() {
                 let response = self.response.as_mut().ok_or(Error::InvalidRequest)?;
-                let next = crate::metrics::timed(&mut metrics.transfer, response.chunk())
-                    .await
-                    .map_err(|e| Error::from_reqwest(Phase::Data, &e))?;
+                let next = crate::metrics::timed(
+                    &mut metrics.transfer,
+                    self.read_timer.wait(Phase::Data, response.chunk()),
+                )
+                .await?
+                .map_err(|e| Error::from_reqwest(Phase::Data, &e))?;
                 match next {
                     Some(chunk) => {
                         metrics.wire_bytes = metrics

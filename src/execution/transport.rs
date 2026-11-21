@@ -272,7 +272,10 @@ impl ReadyExecution {
         let response = Box::pin(self.sender.send_request(self.request));
         let chunk_limit =
             MAX_HTTP_BUFFER.min(self.execution.client.config.resources.max_retained_bytes);
+        let read_timer =
+            crate::read_timeout::ReadTimer::new(self.execution.client.config.read_timeout);
         Ok(AdmittedResponse {
+            read_timer,
             execution: self.execution,
             driver: self.driver,
             response: Some(response),
@@ -316,6 +319,7 @@ impl ResponseChunk {
 /// Dropping without terminal proof quarantines the original client's active slot.
 #[must_use]
 pub struct AdmittedResponse {
+    read_timer: crate::read_timeout::ReadTimer,
     execution: Execution,
     driver: Driver,
     response: Option<ResponseFuture>,
@@ -390,9 +394,9 @@ impl AdmittedResponse {
             });
         }
         if let Some(response) = &mut self.response {
-            let response = timeout_at(deadline, response)
+            let response = timeout_at(deadline, self.read_timer.wait(crate::Phase::Data, response))
                 .await
-                .map_err(|_| TransportError::Deadline)?
+                .map_err(|_| TransportError::Deadline)??
                 .map_err(TransportError::Http)?;
             check_deadline(deadline)?;
             check_exception(response.headers(), response.status().as_u16())?;
@@ -424,9 +428,15 @@ impl AdmittedResponse {
                 }));
             }
             let body = self.body.as_mut().ok_or(TransportError::Poisoned)?;
-            let frame = timeout_at(deadline, poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)))
-                .await
-                .map_err(|_| TransportError::Deadline)?;
+            let frame = timeout_at(
+                deadline,
+                self.read_timer.wait(
+                    crate::Phase::Data,
+                    poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)),
+                ),
+            )
+            .await
+            .map_err(|_| TransportError::Deadline)??;
             check_deadline(deadline)?;
             let Some(frame) = frame else {
                 self.body = None;

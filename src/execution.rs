@@ -868,22 +868,22 @@ impl AntalyaClient {
                 Some(format) => self.build_request(query, format)?,
                 None => self.build_command_request(query)?,
             };
-            let mut response = self
-                .http
-                .execute(request)
-                .await
+            let mut read_timer = crate::read_timeout::ReadTimer::new(self.config.read_timeout);
+            let mut response = read_timer
+                .wait(phase, self.http.execute(request))
+                .await?
                 .map_err(|e| Error::from_reqwest(phase, &e))?;
             if !response.status().is_success() {
-                return Err(server_response_error(response, phase).await);
+                return Err(server_response_error(response, phase, read_timer).await);
             }
             const CAP: usize = 1_048_576;
             if response.content_length().is_some_and(|n| n > CAP as u64) {
                 return Err(Error::at(phase, Cause::LimitExceeded));
             }
             let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
+            while let Some(chunk) = read_timer
+                .wait(phase, response.chunk())
+                .await?
                 .map_err(|e| Error::from_reqwest(phase, &e))?
             {
                 if chunk.len() > CAP.saturating_sub(bytes.len()) {
@@ -1082,7 +1082,11 @@ impl AntalyaClient {
 
 /// Keep only the bounded numeric prefix, never arbitrary error messages. This
 /// runs inside the caller's existing deadline and drops the rest of the body.
-pub(crate) async fn server_response_error(mut response: reqwest::Response, phase: Phase) -> Error {
+pub(crate) async fn server_response_error(
+    mut response: reqwest::Response,
+    phase: Phase,
+    mut read_timer: crate::read_timeout::ReadTimer,
+) -> Error {
     let status = response.status().as_u16();
     let header = response
         .headers()
@@ -1095,8 +1099,10 @@ pub(crate) async fn server_response_error(mut response: reqwest::Response, phase
     let mut prefix = [0_u8; 32];
     let mut used = 0;
     while used < prefix.len() {
-        let Ok(Some(chunk)) = response.chunk().await else {
-            break;
+        let chunk = match read_timer.wait(phase, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Err(error) => return error,
+            Ok(Ok(None) | Err(_)) => break,
         };
         let count = chunk.len().min(prefix.len() - used);
         prefix[used..used + count].copy_from_slice(&chunk[..count]);
