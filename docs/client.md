@@ -130,15 +130,18 @@ admitted response reads, exports, and control HTTP requests. Convenience command
 execution and raw upstream escape hatches retain their own total-deadline contract.
 Read inactivity reports `Cause::ReadTimeout`; total expiry reports `Cause::Timeout`.
 
-`Config::capacity_wait_timeout` limits each full byte-reservation wait to **one
-second by default**. Use `Duration::ZERO` to fail immediately when capacity is
-unavailable, or configure a longer wait when consumers deliberately retain
-batches. The total operation deadline still takes precedence. Setting a wait at
-least as long as the operation timeout restores waiting for the remaining
-operation budget.
-An exhausted wait reports `ErrorKind::LimitExceeded` with `Cause::CapacityTimeout`.
-No partial reservation is made. Cancel/retry can restart this configured wait budget,
-but never extends the total operation deadline.
+`capacity_wait_timeout` gives a reservation blocked by retained output a
+one-second wait budget by default. Pending network reads
+keep their reservations, but waiting on those reads uses the operation deadline.
+A waiter observing only active work resets its retention wait budget. Zero refuses immediately under retention pressure; a longer
+value allows more backpressure. Cancelling and restarting a reservation wait can
+restart this timer, but cannot extend the operation deadline.
+
+Capacity expiry reports `ErrorKind::LimitExceeded` / `Cause::CapacityTimeout`.
+Read inactivity reports `Cause::ReadTimeout`; other operation expiry reports
+`Cause::Timeout`. A byte wait that reaches the operation deadline also reports
+`CapacityTimeout`.
+
 
 The default 64 MiB shared budget limits **simultaneously retained** output; the
 512 MiB per-query bound limits **cumulative** output. Consume and drop batches to

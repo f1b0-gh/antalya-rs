@@ -133,11 +133,14 @@ impl AdmittedResponse {
     /// Select bounded IPC framing before consuming any raw bytes. Requires room
     /// for one maximum frame plus a wire chunk in the shared payload budget.
     /// A refusal drops this already-admitted owner and quarantines unresolved work.
-    pub fn into_ipc(self) -> Result<AdmittedIpc, IpcError> {
+    pub fn into_ipc(mut self) -> Result<AdmittedIpc, IpcError> {
         let frame_limit = frame_limit(&self.execution)?;
         if self.received != 0 || self.response.is_none() || self.poisoned {
             return Err(IpcError::Limit);
         }
+        // A cancelled pre-header raw poll may hold a wire allowance. IPC must
+        // acquire its frame before its wire claim, including after conversion.
+        self.reservation = None;
         Ok(AdmittedIpc {
             response: self,
             chunk: None,

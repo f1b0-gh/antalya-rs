@@ -189,9 +189,10 @@ impl Config {
         self.read_timeout = Some(timeout);
         self
     }
-    /// Bound waiting for a full shared byte reservation. Zero refuses immediately
-    /// when insufficient capacity is available. Defaults to one second. Configure
-    /// a longer wait for deliberate backpressure; the total deadline still applies.
+    /// Bound waiting on retained output that prevents a full byte reservation.
+    /// Defaults to one second; zero refuses immediately under that pressure.
+    /// Waiting on active reads/workers uses the operation deadline instead.
+    /// A waiter observing only active work resets its retention wait budget.
     pub fn capacity_wait_timeout(mut self, timeout: Duration) -> Self {
         self.capacity_wait_timeout = Some(timeout);
         self

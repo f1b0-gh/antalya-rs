@@ -336,7 +336,7 @@ impl Execution {
         if self.pending_lease.is_none() {
             let reserved = timed(
                 &mut self.metrics.queued,
-                self.client.resources.reserve_bytes(
+                self.client.resources.reserve_active(
                     self.client.config.execution_limits.max_batch_bytes,
                     self.deadline,
                 ),
@@ -386,6 +386,7 @@ impl Execution {
                 // Return unused reservation, retain the exact conservative Arrow memory charge.
                 let mut lease = self.pending_lease.take().ok_or(Error::InvalidRequest)?;
                 drop(lease.split(lease.num_permits().saturating_sub(bytes)));
+                lease.make_external();
                 self.rows = rows;
                 self.batches = batches;
                 self.decoded_bytes = decoded_bytes;
