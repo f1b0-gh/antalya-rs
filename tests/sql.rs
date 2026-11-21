@@ -79,3 +79,80 @@ fn unsupported_version_and_missing_capabilities_fail() {
             .is_err()
     );
 }
+
+#[test]
+fn supported_release_families_accept_compatible_patches_with_observed_features() {
+    for version in [
+        "26.6.8.20004.altinityantalya",
+        "26.6.8.20005.altinityantalya",
+        "26.6.9.1.altinityantalya",
+        "26.8.34.20001.altinityantalya",
+        "26.8.34.20002.altinityantalya",
+        "26.8.35.1.altinityantalya",
+    ] {
+        let capabilities = Capabilities::from_observation(version, [Feature::Hybrid])
+            .unwrap_or_else(|error| panic!("{version}: {error}"));
+        assert_eq!(capabilities.version(), version);
+        assert!(capabilities.require(Feature::Hybrid).is_ok(), "{version}");
+        assert!(capabilities.require(Feature::Catalog).is_err(), "{version}");
+        assert!(
+            capabilities.require(Feature::ExportPart).is_err(),
+            "{version}"
+        );
+    }
+}
+
+#[test]
+fn capability_observations_reject_unqualified_families_and_malformed_versions() {
+    for version in [
+        "",
+        "26.6.8.20004",
+        "26.6.8.20004.altinitystable",
+        "26.6.8.20004.altinityantalya.extra",
+        "26.6.8.altinityantalya",
+        "26.6.8.20004.1.altinityantalya",
+        "26.6.8.20003.altinityantalya",
+        "26.6.7.99999.altinityantalya",
+        "26.8.34.20000.altinityantalya",
+        "26.8.33.99999.altinityantalya",
+        "26.7.99.99999.altinityantalya",
+        "26.9.99.99999.altinityantalya",
+        "27.6.8.20004.altinityantalya",
+        "026.6.8.20004.altinityantalya",
+        "26.06.8.20004.altinityantalya",
+        "26.6.08.20004.altinityantalya",
+        "26.6.8.020004.altinityantalya",
+        "26.6.+8.20004.altinityantalya",
+        "26.6.-8.20004.altinityantalya",
+        "26.6..20004.altinityantalya",
+        "26.6.8.4294967296.altinityantalya",
+        "26.6.4294967296.20004.altinityantalya",
+        "26.6.８.20004.altinityantalya",
+        " 26.6.8.20004.altinityantalya",
+        "26.6.8.20004.altinityantalya\n",
+    ] {
+        assert!(
+            matches!(
+                Capabilities::from_observation(
+                    version,
+                    [Feature::Catalog, Feature::Hybrid, Feature::ExportPart]
+                ),
+                Err(antalya_rs::Error::Unsupported)
+            ),
+            "{version:?}"
+        );
+    }
+}
+
+#[test]
+fn compatible_release_does_not_infer_features_from_version() {
+    for version in [
+        "26.6.8.20005.altinityantalya",
+        "26.8.34.20001.altinityantalya",
+    ] {
+        let capabilities = Capabilities::from_observation(version, []).unwrap();
+        for feature in [Feature::Catalog, Feature::Hybrid, Feature::ExportPart] {
+            assert!(capabilities.require(feature).is_err(), "{version}");
+        }
+    }
+}

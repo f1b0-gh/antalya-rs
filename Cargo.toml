@@ -2,6 +2,7 @@
 name = "antalya-rs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "Async Rust client for Antalya"
 repository = "https://github.com/f1b0-gh/antalya-rs"
@@ -22,12 +23,13 @@ clickhouse-ext-arrow = { version = "=0.2.0", optional = true }
 arrow-buffer = { version = "=59.3.3", optional = true }
 arrow-array = { version = "=59.3.3", optional = true }
 arrow-schema = { version = "=59.3.3", optional = true }
-flatbuffers = { version = "=25.12.19", optional = true, default-features = false, features = ["std"] }
+# Compatible with arrow-ipc's FlatBuffers 25 requirement; verifier types are shared.
+flatbuffers = { version = "25.12.19", optional = true, default-features = false, features = ["std"] }
 arrow-ipc = { version = "=59.3.3", features = ["lz4", "zstd"], optional = true }
 tokio = { version = "1.54.1", features = ["time", "sync", "rt"], optional = true }
 serde_json = { version = "1", optional = true }
-base64 = { version = "=0.23.1", default-features = false, features = ["std"], optional = true }
-serde = { version = "=1.0.229", default-features = false, features = ["std"], optional = true }
+base64 = { version = "0.23.1", default-features = false, features = ["std"], optional = true }
+serde = { version = "1.0.229", default-features = false, features = ["std"], optional = true }
 tempfile = { version = "3", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
