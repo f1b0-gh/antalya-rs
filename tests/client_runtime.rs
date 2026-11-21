@@ -127,12 +127,16 @@ async fn cumulative_batch_limit_refuses_before_second_delivery() {
 #[tokio::test]
 async fn retained_batch_clone_keeps_bytes_after_execution_drop() {
     let server = Server::new(stream(1), 2, false, 200);
+    // Leave room for transport backing and Arrow metadata, whose retained size
+    // varies with chunk boundaries and buffer alignment. Equal batch and pool
+    // limits still make any retained clone block the next full reservation.
+    const BUDGET: usize = 64 * 1024;
     let limits = ExecutionLimits {
-        max_batch_bytes: 512,
+        max_batch_bytes: BUDGET,
         ..ExecutionLimits::default()
     };
     let resources = ResourceLimits {
-        max_retained_bytes: 512,
+        max_retained_bytes: BUDGET,
         ..ResourceLimits::default()
     };
     let client = AntalyaClient::new(
@@ -143,6 +147,7 @@ async fn retained_batch_clone_keeps_bytes_after_execution_drop() {
     .unwrap();
     let mut first = client.fetch_arrow(query()).await.unwrap();
     let batch = first.next_batch().await.unwrap().unwrap();
+    assert!(batch.charged_bytes() > 0 && batch.charged_bytes() < BUDGET);
     let retained = batch.clone();
     drop(batch);
     drop(first);
@@ -153,7 +158,8 @@ async fn retained_batch_clone_keeps_bytes_after_execution_drop() {
             .is_err()
     );
     drop(retained);
-    assert_eq!(second.next_batch().await.unwrap().unwrap().num_rows(), 2);
+    let batch = second.next_batch().await.unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 2);
 }
 #[tokio::test]
 async fn saturated_data_lane_refuses_queue_but_leaves_control_available() {
