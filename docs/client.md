@@ -60,7 +60,7 @@ cancellation. Do not present provisional latency as confirmed-result latency.
 
 Query-log verification needs SELECT on `system.query_log`; the server must permit
 query-local logging settings. The default `TerminalPolicy` tries `SYSTEM FLUSH
-LOGS`, then observes with bounded exponential polling (10–100 ms). Opt-in
+LOGS query_log`, then observes with bounded exponential polling (10–100 ms). Opt-in
 `TerminalStrategy::ObserveOnly` is an explicit alternative for principals relying
 on asynchronous query-log publication. It issues no `SYSTEM FLUSH LOGS`; the
 same fresh identity/nonce-bound terminal proof, result-row count checks, backoff
@@ -70,7 +70,9 @@ publication delay itself.
 
 `TerminalStrategy::ObserveFirst` checks for complete proof before forcing one
 flush, avoiding that call only if proof already exists. A refused flush is recorded
-and asynchronous log visibility can still establish success. Identity checks, data transfer and
+and asynchronous log visibility can still establish success. Observation prunes
+query-log partitions using the execution start date with a one-day clock-skew
+allowance, while still matching the exact ID and random marker. Identity checks, data transfer and
 verification share one operation deadline. Cancellation gets its own deadline.
 The lifecycle settings `log_comment`, `log_queries`, `log_queries_probability`,
 `log_queries_min_query_duration_ms`, `log_query_settings` and
@@ -105,6 +107,12 @@ proof that lost result data were delivered. Revalidate host authorization before
 start and recovery. Recovery never replays the SELECT and never yields a verified
 data result. A prepared-but-never-started attempt may have no remote record:
 absence is Unknown, so hosts must not infer remote termination from it.
+
+Persist the optional `RecoveryReceipt::log_since()` value alongside the receipt
+identity and restore it with `with_log_since`. This keeps the original partition
+bound when recovering days later. Receipts restored without this value use an
+unbounded date search for older journals. Hosts with more than one day of clock
+skew should correct their clocks; missing evidence remains Unknown.
 
 Hosts that need synchronous transport admission can consume a prepared SELECT
 with `ready_transport().await`. It establishes a dedicated HTTP/1 connection,
@@ -382,7 +390,15 @@ Use `Error::kind()` for category matching, `phase()`/`cause()` for diagnostics a
 remain available, but runtime errors may now be contextual. HTTP status, numeric
 server code when available, I/O kind, malformed JSON, Arrow decoding, capacity,
 timeout and invalid proof remain distinguishable without retaining raw server
-messages. A transport/server response error alone does not prove remote completion.
+messages. Known codes include a static explanation, such as unknown table,
+read-only setting refusal or insufficient privileges. Raw messages can contain
+SQL and credentials and are not retained. Use the query ID to investigate in
+access-controlled server logs.
+
+Setting/authentication/privilege refusals return promptly instead of waiting for
+a terminal record that the server may never create. Reports retain the numeric
+code and an Unknown outcome; a server response alone does not prove remote
+completion or authorize replay.
 
 ## Raw transport escape hatches
 

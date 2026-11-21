@@ -585,13 +585,18 @@ async fn live_expired_data_credential_uses_separately_authorized_completion() ->
             },
         )?)
         .await;
-    assert!(matches!(
-        identity,
-        Err(antalya_rs::Error::Context {
-            cause: antalya_rs::Cause::HttpStatus(401 | 403),
-            ..
-        })
-    ));
+    let identity_error = identity.err().expect("forged credential must be rejected");
+    assert!(
+        matches!(
+            identity_error,
+            antalya_rs::Error::Context {
+                cause: antalya_rs::Cause::HttpStatus(401 | 403)
+                    | antalya_rs::Cause::ServerResponse(Some(516)),
+                ..
+            }
+        ),
+        "unexpected forged credential error: {identity_error:?}"
+    );
     let data = base.with_jwt_receiver(profile()?, token)?;
     let request = AuthorizedRequest::new(
         Query::new(
@@ -643,6 +648,10 @@ async fn live_expired_data_credential_uses_separately_authorized_completion() ->
             response,
             Err(DecodeError::Ipc(antalya_rs::IpcError::Transport(
                 antalya_rs::TransportError::HttpStatus(401 | 403)
+                    | antalya_rs::TransportError::Client(antalya_rs::Error::Context {
+                        cause: antalya_rs::Cause::ServerResponse(Some(516)),
+                        ..
+                    })
             )))
         ),
         "unexpected delayed response: {response:?}"
@@ -651,11 +660,12 @@ async fn live_expired_data_credential_uses_separately_authorized_completion() ->
     // local owner remains uncertain and cannot authorize replay or publication.
     assert_eq!(refused.outcome(), Outcome::Unknown);
     // Use the standalone observation API so this intentionally refused control
-    // cannot poison the retained response. It must retain the HTTP cause.
+    // cannot poison the retained response. It must retain the authentication cause.
     assert!(matches!(
         data.observe_terminal(&receipt).await,
         Err(antalya_rs::Error::Context {
-            cause: antalya_rs::Cause::HttpStatus(401 | 403),
+            cause: antalya_rs::Cause::HttpStatus(401 | 403)
+                | antalya_rs::Cause::ServerResponse(Some(516)),
             ..
         })
     ));

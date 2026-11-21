@@ -37,6 +37,10 @@ pub enum Cause {
     Decoder,
     Io(io::ErrorKind),
     Timeout,
+    /// No response data arrived within the configured read inactivity timeout.
+    ReadTimeout,
+    /// Shared retained-output capacity was unavailable before its wait deadline.
+    CapacityTimeout,
     Capacity,
     LimitExceeded,
     InvalidProof,
@@ -48,7 +52,13 @@ impl fmt::Display for Cause {
         match self {
             Self::Transport(kind) => write!(f, "transport failure ({kind:?})"),
             Self::HttpStatus(status) => write!(f, "HTTP status {status}"),
-            Self::ServerResponse(Some(code)) => write!(f, "server response error (code {code})"),
+            Self::ServerResponse(Some(code)) => {
+                write!(f, "server response error (code {code})")?;
+                if let Some(description) = server_code_description(*code) {
+                    write!(f, ": {description}")?;
+                }
+                Ok(())
+            }
             Self::ServerResponse(None) => f.write_str("server response error"),
             Self::IdentityMismatch => {
                 f.write_str("authenticated principal does not match authorization")
@@ -57,7 +67,9 @@ impl fmt::Display for Cause {
             Self::Decoder => f.write_str("Arrow decoder failure"),
             Self::Io(kind) => write!(f, "I/O failure ({kind:?})"),
             Self::Timeout => f.write_str("operation deadline elapsed"),
-            Self::Capacity => f.write_str("operation queue is full"),
+            Self::ReadTimeout => f.write_str("response read inactivity deadline elapsed"),
+            Self::CapacityTimeout => f.write_str("shared capacity wait deadline elapsed; release retained output or increase capacity"),
+            Self::Capacity => f.write_str("insufficient shared capacity"),
             Self::LimitExceeded => f.write_str("configured resource limit exceeded"),
             Self::InvalidProof => f.write_str("terminal evidence is incomplete or invalid"),
             Self::QueryFailed => f.write_str("terminal evidence proves query failure"),
@@ -156,8 +168,10 @@ impl Error {
                     Phase::Validation => ErrorKind::InvalidIpc,
                     _ => ErrorKind::Transport,
                 },
-                Cause::Timeout => ErrorKind::Timeout,
-                Cause::Capacity | Cause::LimitExceeded => ErrorKind::LimitExceeded,
+                Cause::Timeout | Cause::ReadTimeout => ErrorKind::Timeout,
+                Cause::Capacity | Cause::CapacityTimeout | Cause::LimitExceeded => {
+                    ErrorKind::LimitExceeded
+                }
                 Cause::InvalidProof => ErrorKind::Unconfirmed,
                 Cause::QueryFailed => ErrorKind::QueryFailed,
                 Cause::InvalidSetting => ErrorKind::InvalidSetting,
@@ -192,6 +206,45 @@ impl Error {
         Self::at(phase, Cause::Io(error.kind()))
     }
 
+    /// Classify a failed HTTP response without retaining any server text.
+    ///
+    /// Prefer a strictly numeric `X-ClickHouse-Exception-Code` header, then a
+    /// leading `Code: N.` body prefix. Parsing examines at most ten digits and
+    /// never scans the remaining body. Missing or malformed codes fall back to
+    /// the HTTP status; unknown numeric codes remain available. Callers must
+    /// bound response reads independently.
+    pub fn from_server_response(
+        phase: Phase,
+        status: u16,
+        exception_header: Option<&str>,
+        body: &[u8],
+    ) -> Self {
+        let code = exception_header
+            .and_then(|header| parse_server_code(header.as_bytes()))
+            .or_else(|| body_server_code(body));
+        Self::at(
+            phase,
+            code.map_or(Cause::HttpStatus(status), |code| {
+                Cause::ServerResponse(Some(code))
+            }),
+        )
+    }
+
+    /// Whether this code commonly indicates a request setting or access refusal.
+    ///
+    /// This permits prompt reporting when terminal query-log evidence may never
+    /// appear. It is not proof that execution never started or that remote work
+    /// stopped, and must not be promoted to a confirmed terminal outcome.
+    pub const fn is_pre_execution_refusal(self) -> bool {
+        matches!(
+            self,
+            Self::Context {
+                cause: Cause::ServerResponse(Some(115 | 164 | 497 | 516)),
+                ..
+            }
+        )
+    }
+
     /// Classify upstream decoder/transport failures without raw server text.
     #[cfg(feature = "arrow")]
     pub fn from_upstream(phase: Phase, error: &clickhouse::error::Error) -> Self {
@@ -199,15 +252,7 @@ impl Error {
         let cause = match error {
             Upstream::TimedOut => Cause::Timeout,
             Upstream::BadResponse(message) => {
-                let code = message
-                    .strip_prefix("Code: ")
-                    .and_then(|text| text.split_once('.'))
-                    .map(|(digits, _)| digits)
-                    .filter(|digits| {
-                        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
-                    })
-                    .and_then(|digits| digits.parse::<u32>().ok());
-                Cause::ServerResponse(code)
+                Cause::ServerResponse(body_server_code(message.as_bytes()))
             }
             Upstream::DataFormat(_)
             | Upstream::Decompression(_)
@@ -233,6 +278,39 @@ impl Error {
             _ => Cause::Transport(TransportKind::Other),
         };
         Self::at(phase, cause)
+    }
+}
+
+fn parse_server_code(digits: &[u8]) -> Option<u32> {
+    if digits.is_empty() || digits.len() > 10 {
+        return None;
+    }
+    digits.iter().try_fold(0_u32, |code, byte| {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        code.checked_mul(10)?.checked_add(u32::from(byte - b'0'))
+    })
+}
+
+fn body_server_code(body: &[u8]) -> Option<u32> {
+    let remainder = body.strip_prefix(b"Code: ")?;
+    let end = remainder.iter().take(11).position(|byte| *byte == b'.')?;
+    parse_server_code(&remainder[..end])
+}
+
+// Fixed descriptions only: arbitrary exception text can contain SQL, credentials,
+// endpoint names, and user-controlled identifiers that cannot be safely filtered.
+fn server_code_description(code: u32) -> Option<&'static str> {
+    match code {
+        60 => Some("unknown table"),
+        62 => Some("query syntax error"),
+        81 => Some("unknown database"),
+        115 => Some("unknown setting"),
+        164 => Some("read-only policy rejected query or setting change"),
+        497 => Some("access denied"),
+        516 => Some("authentication failed"),
+        _ => None,
     }
 }
 impl fmt::Display for Error {

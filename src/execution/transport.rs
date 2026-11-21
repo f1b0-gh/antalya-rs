@@ -4,7 +4,7 @@ mod ipc;
 use super::{
     Execution, PreparedExecution, RecoveryReceipt, RemoteTermination, TerminalObservation,
 };
-use crate::{Error, Format};
+use crate::{Cause, Error, Format, Phase};
 use hyper::{
     Request, Response,
     body::{Body, Bytes, Incoming},
@@ -228,6 +228,10 @@ fn execution_receipt(execution: &Execution) -> Result<RecoveryReceipt, Error> {
         execution.nonce.clone(),
         execution.principal.clone().ok_or(Error::InvalidRequest)?,
     )
+    .map(|mut receipt| {
+        receipt.log_since = execution.log_since;
+        receipt
+    })
 }
 impl ReadyExecution {
     pub(super) fn check_receiver_deadline(&self, before: u64) -> Result<(), TransportError> {
@@ -391,10 +395,10 @@ impl AdmittedResponse {
                 .map_err(|_| TransportError::Deadline)?
                 .map_err(TransportError::Http)?;
             check_deadline(deadline)?;
+            check_exception(response.headers(), response.status().as_u16())?;
             if response.status() != hyper::StatusCode::OK {
                 return Err(TransportError::HttpStatus(response.status().as_u16()));
             }
-            check_exception(response.headers())?;
             if response.body().size_hint().lower()
                 > self
                     .execution
@@ -466,7 +470,7 @@ impl AdmittedResponse {
                 }
                 Err(frame) => {
                     if let Ok(trailers) = frame.into_trailers() {
-                        check_exception(&trailers)?;
+                        check_exception(&trailers, 200)?;
                     }
                 }
             }
@@ -523,7 +527,7 @@ fn check_deadline(deadline: Instant) -> Result<(), TransportError> {
 fn connection_error<E: Into<Box<dyn std::error::Error + Send + Sync>>>(error: E) -> TransportError {
     TransportError::Connect(error.into())
 }
-fn check_exception(headers: &HeaderMap) -> Result<(), TransportError> {
+fn check_exception(headers: &HeaderMap, status: u16) -> Result<(), TransportError> {
     let mut values = headers.get_all("x-clickhouse-exception-code").iter();
     if let Some(code) = values.next() {
         if values.next().is_some() {
@@ -532,6 +536,10 @@ fn check_exception(headers: &HeaderMap) -> Result<(), TransportError> {
         // Only the exact non-error marker is acceptable, including in trailers.
         // Invalid/nonzero codes are server error indications, never zero defaults.
         if code.as_bytes() != b"0" {
+            let error = Error::from_server_response(Phase::Data, status, code.to_str().ok(), &[]);
+            if matches!(error.cause(), Some(Cause::ServerResponse(Some(code))) if code != 0) {
+                return Err(TransportError::Client(error));
+            }
             return Err(TransportError::ServerException);
         }
     }

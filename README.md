@@ -59,7 +59,7 @@ execution does not confirm remote cancellation.
 
 The default completion strategy needs permitted query-local logging settings,
 `SELECT` access to `system.query_log`, and routing of data and verification
-requests to the same server. It attempts `SYSTEM FLUSH LOGS`, then polls for
+requests to the same server. It attempts `SYSTEM FLUSH LOGS query_log`, then polls for
 an execution-specific terminal record. `ObserveOnly` avoids the flush request
 when relying on asynchronous log publication. Explicit cancellation needs
 `KILL QUERY` permission and terminal confirmation.

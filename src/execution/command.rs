@@ -129,6 +129,15 @@ impl CommandExecution {
             Ok(Err(error)) => Some(Error::from_upstream(Phase::Data, &error)),
             Ok(Ok(())) => None,
         };
+        if execution
+            .metrics
+            .last_error
+            .is_some_and(|error| error.is_pre_execution_refusal())
+        {
+            // Admission remains quarantined: the refusal is diagnostic evidence,
+            // not proof that remote execution has stopped.
+            return Ok(self.report());
+        }
         self.observe(self.prepared.execution.deadline).await;
         Ok(self.report())
     }
@@ -160,6 +169,7 @@ impl CommandExecution {
                 deadline,
                 &mut execution.metrics,
                 execution.principal.as_deref(),
+                execution.log_since,
             )
             .await;
         execution.outcome = outcome;
