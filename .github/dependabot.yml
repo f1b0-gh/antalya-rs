@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '08:00'
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    groups:
+      # These crates exchange Arrow types and need coordinated version updates.
+      arrow:
+        patterns:
+          - 'arrow-*'
+          - clickhouse-ext-arrow
+      other-minor-and-patch:
+        patterns:
+          - '*'
+        exclude-patterns:
+          - 'arrow-*'
+          - clickhouse-ext-arrow
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '08:00'
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - '*'

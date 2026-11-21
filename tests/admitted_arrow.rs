@@ -1082,7 +1082,10 @@ async fn delta_releases_internal_ownership_of_backing_retained_only_by_old_outpu
         Config::new(server.endpoint.clone(), Credentials::bearer("token")?)
             .timeout(Duration::from_secs(5))
             .resources(antalya_rs::ResourceLimits {
-                max_retained_bytes: 2 * 1024 * 1024 + 576 * 1024,
+                // Allow the second delta's workspace with the first output retained:
+                // four 128 KiB allocations, a full 64 KiB wire chunk, and metadata.
+                // The third delta still needs the caller to release the first output.
+                max_retained_bytes: 2 * 1024 * 1024 + 640 * 1024,
                 ..Default::default()
             })
             .execution_limits(ExecutionLimits {
@@ -1107,11 +1110,15 @@ async fn delta_releases_internal_ownership_of_backing_retained_only_by_old_outpu
         .admit_arrow()?;
     let first = stream
         .next_batch()
-        .await?
+        .await
+        .map_err(|error| io::Error::other(format!("first delta batch: {error}")))?
         .ok_or_else(|| io::Error::other("first"))?;
+    // Let the transport prefetch while the caller retains its first batch.
+    tokio::time::sleep(Duration::from_millis(20)).await;
     let second = stream
         .next_batch()
-        .await?
+        .await
+        .map_err(|error| io::Error::other(format!("second delta batch: {error}")))?
         .ok_or_else(|| io::Error::other("second"))?;
     assert_eq!(dictionary_text(second.column(0).as_ref(), 1)?, strings[1]);
     drop(second);
@@ -1124,7 +1131,8 @@ async fn delta_releases_internal_ownership_of_backing_retained_only_by_old_outpu
     drop(first);
     let third = stream
         .next_batch()
-        .await?
+        .await
+        .map_err(|error| io::Error::other(format!("third delta batch: {error}")))?
         .ok_or_else(|| io::Error::other("third"))?;
     assert_eq!(dictionary_text(third.column(0).as_ref(), 2)?, strings[2]);
     drop(third);
