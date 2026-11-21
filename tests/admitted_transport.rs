@@ -5,8 +5,8 @@
 mod http;
 mod support;
 use antalya_rs::{
-    AntalyaClient, AuthorizationContext, AuthorizedRequest, Config, Credentials, Error,
-    ExecutionLimits, Format, Query, ResourceLimits, TransportError,
+    AntalyaClient, AuthorizationContext, AuthorizedRequest, Cause, Config, Credentials, Error,
+    ExecutionLimits, Format, Phase, Query, ResourceLimits, TransportError,
 };
 use std::{io, time::Duration};
 use support::{Server, stream};
@@ -376,9 +376,122 @@ async fn redirect_and_server_exception_are_refused_without_followup() -> Result<
         let error = response.next_chunk().await.err().ok_or_else(|| io::Error::other("failed response accepted"))?;
         match expected_status {
             Some(expected) => assert!(matches!(error, TransportError::HttpStatus(status) if status == expected)),
-            None => assert!(matches!(error, TransportError::ServerException)),
+            None => assert!(matches!(error, TransportError::Client(error) if error.cause() == Some(Cause::ServerResponse(Some(42))))),
         }
         assert!(!response.transport_eof());
+        server.finish()?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn numeric_exception_headers_preserve_codes_without_reading_error_body() -> Result<()> {
+    for (status, code) in [(200, 164), (500, 60), (403, 497), (500, u32::MAX)] {
+        // The declared body is incomplete: diagnostics must come from headers
+        // without consuming it or reporting a body transport failure.
+        let reply = format!(
+            "HTTP/1.1 {status} Test\r\nX-ClickHouse-Exception-Code: {code}\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\nSELECT secret-token FROM private_table"
+        );
+        let server = http::Server::new(reply.into_bytes())?;
+        let mut response = server.admit(1024).await?;
+        let error = response
+            .next_chunk()
+            .await
+            .err()
+            .ok_or_else(|| io::Error::other("exception accepted"))?;
+        assert!(
+            matches!(error, TransportError::Client(inner) if inner.cause() == Some(Cause::ServerResponse(Some(code))) && inner.phase() == Some(Phase::Data))
+        );
+        let source = std::error::Error::source(&error)
+            .ok_or_else(|| io::Error::other("missing diagnostic source"))?;
+        for text in [
+            format!("{error:?}"),
+            error.to_string(),
+            source.to_string(),
+            format!("{source:?}"),
+        ] {
+            for secret in ["SELECT", "secret-token", "private_table"] {
+                assert!(!text.contains(secret));
+            }
+        }
+        assert_eq!(response.wire_bytes(), 0);
+        assert!(!response.transport_eof());
+        assert!(matches!(
+            response.next_chunk().await,
+            Err(TransportError::Poisoned)
+        ));
+        server.finish()?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn numeric_exception_trailer_preserves_code_without_claiming_clean_eof() -> Result<()> {
+    let server = http::Server::new(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\nX-ClickHouse-Exception-Code: 164\r\n\r\n".to_vec())?;
+    let mut response = server.admit(1024).await?;
+    let error = response
+        .next_chunk()
+        .await
+        .err()
+        .ok_or_else(|| io::Error::other("exception trailer accepted"))?;
+    assert!(
+        matches!(error, TransportError::Client(inner) if inner.cause() == Some(Cause::ServerResponse(Some(164))))
+    );
+    assert!(!response.transport_eof());
+    server.finish()
+}
+
+#[tokio::test]
+async fn malformed_and_duplicate_exception_headers_remain_refusals_on_error_statuses() -> Result<()>
+{
+    for status in [200, 500] {
+        for code in [
+            "",
+            "+164",
+            "00",
+            "4294967296",
+            "00000000164",
+            "secret-token",
+        ] {
+            let reply = format!(
+                "HTTP/1.1 {status} Test\r\nX-ClickHouse-Exception-Code: {code}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let server = http::Server::new(reply.into_bytes())?;
+            let mut response = server.admit(1024).await?;
+            assert!(matches!(
+                response.next_chunk().await,
+                Err(TransportError::ServerException)
+            ));
+            assert!(!response.transport_eof());
+            server.finish()?;
+        }
+        let reply = format!(
+            "HTTP/1.1 {status} Test\r\nX-ClickHouse-Exception-Code: 0\r\nX-ClickHouse-Exception-Code: 164\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let server = http::Server::new(reply.into_bytes())?;
+        let mut response = server.admit(1024).await?;
+        assert!(matches!(
+            response.next_chunk().await,
+            Err(TransportError::InvalidResponse)
+        ));
+        server.finish()?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn absent_or_zero_exception_header_keeps_status_diagnostic() -> Result<()> {
+    for header in ["", "X-ClickHouse-Exception-Code: 0\r\n"] {
+        let reply = format!(
+            "HTTP/1.1 500 Test\r\n{header}Content-Length: 1000000\r\nConnection: close\r\n\r\nCode: 164. secret-token"
+        );
+        let server = http::Server::new(reply.into_bytes())?;
+        let mut response = server.admit(1024).await?;
+        assert!(matches!(
+            response.next_chunk().await,
+            Err(TransportError::HttpStatus(500))
+        ));
+        assert_eq!(response.wire_bytes(), 0);
         server.finish()?;
     }
     Ok(())

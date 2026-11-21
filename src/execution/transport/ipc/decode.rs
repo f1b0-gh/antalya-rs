@@ -398,6 +398,7 @@ impl AdmittedArrow {
                 execution.deadline,
                 &mut execution.metrics,
                 execution.principal.as_deref(),
+                execution.log_since,
             )
             .await;
         execution.progress = progress;

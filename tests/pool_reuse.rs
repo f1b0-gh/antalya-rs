@@ -158,7 +158,7 @@ fn serve(
         let sql = String::from_utf8(body).map_err(io::Error::other)?;
         let (kind, reply): (_, &[u8]) = if sql.contains("FROM system.query_log") {
             (RequestKind::Observe, br#"{"data":[{"starts":1,"finishes":1,"errors":0,"cancelled":0,"result_rows":0,"read_rows":0,"read_bytes":0}]}"#)
-        } else if sql.trim() == "SYSTEM FLUSH LOGS" {
+        } else if sql.trim() == "SYSTEM FLUSH LOGS query_log" {
             (RequestKind::Flush, b"")
         } else if sql.trim() == "CREATE DATABASE pool_fixture" {
             (RequestKind::Command, b"")

@@ -47,6 +47,7 @@ pub struct RecoveryReceipt {
     query_id: String,
     marker: String,
     principal: String,
+    log_since: Option<u64>,
 }
 impl std::fmt::Debug for RecoveryReceipt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -68,7 +69,22 @@ impl RecoveryReceipt {
             query_id,
             marker,
             principal,
+            log_since: None,
         })
+    }
+    /// Restore the partition bound saved with this receipt. Old journals may
+    /// omit it and retain an unbounded lookup; never substitute today's date.
+    pub fn with_log_since(mut self, unix_seconds: u64) -> Result<Self, Error> {
+        if unix_seconds > u64::from(u32::MAX) {
+            return Err(Error::InvalidRequest);
+        }
+        self.log_since = Some(unix_seconds);
+        Ok(self)
+    }
+    /// Persist this optional lower bound alongside the original identity fields.
+    /// It is based on preparation time with a one-day clock-skew allowance.
+    pub fn log_since(&self) -> Option<u64> {
+        self.log_since
     }
     fn validate_parts(
         endpoint: &crate::Endpoint,
@@ -121,6 +137,10 @@ impl PreparedExecution {
             execution.nonce.clone(),
             execution.principal.clone().ok_or(Error::InvalidRequest)?,
         )
+        .map(|mut receipt| {
+            receipt.log_since = execution.log_since;
+            receipt
+        })
     }
     pub fn start(mut self) -> Result<Execution, Error> {
         if Instant::now() >= self.execution.deadline {
@@ -229,6 +249,7 @@ pub struct Execution {
     stream_error: Option<Error>,
     metrics: ExecutionMetrics,
     principal: Option<String>,
+    log_since: Option<u64>,
 }
 impl Execution {
     pub fn query_id(&self) -> &str {
@@ -410,6 +431,13 @@ impl Execution {
     }
 
     async fn finish(&mut self) -> Result<Option<BudgetedBatch>, Error> {
+        // These refusals may precede query-log insertion. Report promptly while
+        // preserving uncertainty; a response code is not remote terminal proof.
+        if let Some(error) = self.stream_error.filter(|error| {
+            error.is_pre_execution_refusal() || error.cause() == Some(Cause::ReadTimeout)
+        }) {
+            return Err(self.refuse(error));
+        }
         if self.client.config.terminal_policy.strategy == TerminalStrategy::InBand {
             let begin = Instant::now();
             let error = self.stream_error.or_else(|| {
@@ -441,6 +469,7 @@ impl Execution {
                 self.deadline,
                 &mut self.metrics,
                 self.principal.as_deref(),
+                self.log_since,
             )
             .await;
         self.progress = progress;
@@ -511,6 +540,7 @@ impl Execution {
                 deadline,
                 &mut self.metrics,
                 self.principal.as_deref(),
+                self.log_since,
             )
             .await;
         self.progress = progress;
@@ -552,6 +582,7 @@ impl Execution {
                 deadline,
                 &mut self.metrics,
                 self.principal.as_deref(),
+                self.log_since,
             )
             .await;
         self.progress = progress;
@@ -581,7 +612,7 @@ impl Execution {
 pub(crate) fn probe(sql: &str) -> Result<Query, Error> {
     Query::new(sql, format!("antalya-probe-{}", uuid::Uuid::new_v4()))
 }
-pub(crate) fn tracked(mut query: Query) -> (Query, String) {
+pub(crate) fn tracked(mut query: Query) -> (Query, String, Option<u64>) {
     let nonce = uuid::Uuid::new_v4().to_string();
     for (k, v) in [
         ("log_queries", "1"),
@@ -592,7 +623,14 @@ pub(crate) fn tracked(mut query: Query) -> (Query, String) {
     ] {
         query.settings.insert(k.into(), v.into());
     }
-    (query, nonce)
+    // Bound partition reads from this execution's preparation, not from the
+    // observer's current date. Old receipts without a bound remain supported.
+    let log_since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_secs().saturating_sub(86_400))
+        .filter(|seconds| *seconds <= u64::from(u32::MAX));
+    (query, nonce, log_since)
 }
 fn number(value: &Value) -> Option<u64> {
     value.as_u64().or_else(|| value.as_str()?.parse().ok())
@@ -677,7 +715,7 @@ impl AntalyaClient {
                 return Err(Error::at(Phase::Identity, Cause::IdentityMismatch));
             }
         }
-        let (query, nonce) = tracked(self.scoped(&query));
+        let (query, nonce, log_since) = tracked(self.scoped(&query));
         Ok(PreparedExecution {
             execution: Execution {
                 client: self.clone(),
@@ -697,6 +735,7 @@ impl AntalyaClient {
                 stream_error: None,
                 metrics,
                 principal,
+                log_since,
             },
         })
     }
@@ -731,6 +770,7 @@ impl AntalyaClient {
                 deadline,
                 &mut metrics,
                 Some(&receipt.principal),
+                receipt.log_since,
             )
             .await;
         let termination = match outcome {
@@ -760,7 +800,15 @@ impl AntalyaClient {
             .map_err(|e| Error::from_upstream(Phase::Data, &e))
     }
     pub async fn execute_command(&self, query: Query) -> Result<Outcome, Error> {
-        Ok(self.execute_command_report(query).await?.outcome)
+        let report = self.execute_command_report(query).await?;
+        if let Some(error) = report
+            .metrics
+            .last_error
+            .filter(|e| e.is_pre_execution_refusal())
+        {
+            return Err(error);
+        }
+        Ok(report.outcome)
     }
     pub async fn execute_command_report(&self, query: Query) -> Result<CommandReport, Error> {
         if self.config.terminal_policy.strategy == TerminalStrategy::InBand {
@@ -775,7 +823,7 @@ impl AntalyaClient {
             queued: started.elapsed(),
             ..ExecutionMetrics::default()
         };
-        let (query, nonce) = tracked(self.scoped(&query));
+        let (query, nonce, log_since) = tracked(self.scoped(&query));
         let result = timed(
             &mut metrics.data_poll,
             complete_before(
@@ -790,9 +838,19 @@ impl AntalyaClient {
             Ok(Err(e)) => metrics.last_error = Some(Error::from_upstream(Phase::Data, &e)),
             Ok(Ok(())) => (),
         }
+        if metrics
+            .last_error
+            .is_some_and(|error| error.is_pre_execution_refusal())
+        {
+            metrics.total = started.elapsed();
+            return Ok(CommandReport {
+                outcome: Outcome::Unknown,
+                metrics,
+            });
+        }
         // Transport failure cannot establish whether command side effects ran.
         let (outcome, _) = self
-            .terminal_until(&query.id, &nonce, deadline, &mut metrics, None)
+            .terminal_until(&query.id, &nonce, deadline, &mut metrics, None, log_since)
             .await;
         metrics.total = started.elapsed();
         Ok(CommandReport { outcome, metrics })
@@ -816,10 +874,7 @@ impl AntalyaClient {
                 .await
                 .map_err(|e| Error::from_reqwest(phase, &e))?;
             if !response.status().is_success() {
-                return Err(Error::at(
-                    phase,
-                    Cause::HttpStatus(response.status().as_u16()),
-                ));
+                return Err(server_response_error(response, phase).await);
             }
             const CAP: usize = 1_048_576;
             if response.content_length().is_some_and(|n| n > CAP as u64) {
@@ -883,12 +938,20 @@ impl AntalyaClient {
         deadline: Instant,
         metrics: &mut ExecutionMetrics,
         principal: Option<&str>,
+        log_since: Option<u64>,
     ) -> (Outcome, Option<Progress>) {
         let mut measurement = TerminalMeasurement::new(metrics);
         let result = complete_before(
             deadline,
             Phase::Control,
-            self.terminal_checked(id, nonce, deadline, &mut measurement.metrics, principal),
+            self.terminal_checked(
+                id,
+                nonce,
+                deadline,
+                &mut measurement.metrics,
+                principal,
+                log_since,
+            ),
         )
         .await;
         match result {
@@ -907,7 +970,7 @@ impl AntalyaClient {
         metrics.control_requests = metrics.control_requests.saturating_add(1);
         metrics.flush_attempts = metrics.flush_attempts.saturating_add(1);
         let result = timed(&mut metrics.flush_time, async {
-            let result = match probe("SYSTEM FLUSH LOGS") {
+            let result = match probe("SYSTEM FLUSH LOGS query_log") {
                 Ok(query) => {
                     self.bounded_response_until(&query, None, deadline, Phase::Control)
                         .await
@@ -935,6 +998,7 @@ impl AntalyaClient {
         deadline: Instant,
         metrics: &mut ExecutionMetrics,
         principal: Option<&str>,
+        log_since: Option<u64>,
     ) -> Result<(Outcome, Option<Progress>), Error> {
         let policy = &self.config.terminal_policy;
         let mut delay = policy.initial_delay;
@@ -944,13 +1008,21 @@ impl AntalyaClient {
         }
         loop {
             let sql = "SELECT countIf(type = 'QueryStart') AS starts, countIf(type = 'QueryFinish') AS finishes, countIf(type IN ('ExceptionBeforeStart', 'ExceptionWhileProcessing')) AS errors, countIf(type IN ('ExceptionBeforeStart', 'ExceptionWhileProcessing') AND exception_code = 394) AS cancelled, max(read_rows) AS read_rows, max(read_bytes) AS read_bytes, max(result_rows) AS result_rows FROM system.query_log WHERE query_id={id:String} AND log_comment={nonce:String} AND is_initial_query=1 AND user=currentUser()";
+            let sql = if log_since.is_some() {
+                format!("{sql} AND event_date >= toDate(toDateTime({{log_since:UInt64}}))")
+            } else {
+                sql.into()
+            };
             let mut query = probe(&if principal.is_some() {
                 format!("{sql} AND user={{principal:String}} ")
             } else {
-                sql.into()
+                sql
             })?
             .parameter("id", id)?
             .parameter("nonce", nonce)?;
+            if let Some(log_since) = log_since {
+                query = query.typed_parameter("log_since", crate::Parameter::UInt64(log_since))?;
+            }
             if let Some(principal) = principal {
                 query = query.parameter("principal", principal)?;
             }
@@ -1006,6 +1078,34 @@ impl AntalyaClient {
             return Ok((outcome, progress(row)));
         }
     }
+}
+
+/// Keep only the bounded numeric prefix, never arbitrary error messages. This
+/// runs inside the caller's existing deadline and drops the rest of the body.
+pub(crate) async fn server_response_error(mut response: reqwest::Response, phase: Phase) -> Error {
+    let status = response.status().as_u16();
+    let header = response
+        .headers()
+        .get("x-clickhouse-exception-code")
+        .and_then(|h| h.to_str().ok());
+    let error = Error::from_server_response(phase, status, header, &[]);
+    if matches!(error.cause(), Some(Cause::ServerResponse(_))) {
+        return error;
+    }
+    let mut prefix = [0_u8; 32];
+    let mut used = 0;
+    while used < prefix.len() {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let count = chunk.len().min(prefix.len() - used);
+        prefix[used..used + count].copy_from_slice(&chunk[..count]);
+        used += count;
+        if prefix[..used].contains(&b'.') {
+            break;
+        }
+    }
+    Error::from_server_response(phase, status, None, &prefix[..used])
 }
 
 async fn complete_before<T>(

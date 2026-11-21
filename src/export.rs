@@ -293,7 +293,7 @@ impl AntalyaClient {
             let queued = Instant::now();
             let data_permit = self.resources.acquire(Lane::Data, deadline).await?;
             metrics.queued += queued.elapsed();
-            let (query, nonce) = tracked(self.scoped(&query));
+            let (query, nonce, log_since) = tracked(self.scoped(&query));
             let mut cursor = self.fetch_bytes(&query, format)?;
             let mut bytes = 0u64;
             let chunk_size = CHUNK_BYTES.min(self.resources.retained_capacity());
@@ -347,7 +347,7 @@ impl AntalyaClient {
             metrics.queued += queued.elapsed();
             let validated = receive(response, deadline, Phase::Validation).await??;
             let (outcome, progress) = self
-                .terminal_until(&query.id, &nonce, deadline, &mut metrics, None)
+                .terminal_until(&query.id, &nonce, deadline, &mut metrics, None, log_since)
                 .await;
             if outcome != Outcome::Succeeded {
                 return Err(if outcome == Outcome::Unknown {
