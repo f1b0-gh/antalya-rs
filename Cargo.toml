@@ -15,8 +15,9 @@ tls = ["reqwest/rustls", "dep:hyper-rustls", "dep:rustls", "clickhouse?/rustls-t
 
 [dependencies]
 reqwest = { version = "0.13.5", default-features = false }
-clickhouse = { version = "0.15.3", default-features = false, optional = true }
-clickhouse-ext-arrow = { version = "0.2.0", optional = true }
+# Qualified together with Arrow below; upgrade as a set (see docs/testing.md).
+clickhouse = { version = "=0.15.3", default-features = false, optional = true }
+clickhouse-ext-arrow = { version = "=0.2.0", optional = true }
 
 arrow-buffer = { version = "=59.3.3", optional = true }
 arrow-array = { version = "=59.3.3", optional = true }

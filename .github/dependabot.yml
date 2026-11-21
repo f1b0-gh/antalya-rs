@@ -8,17 +8,24 @@ updates:
       time: '08:00'
       timezone: Europe/Paris
     open-pull-requests-limit: 5
+    # The adapter currently supports Arrow 59. A new major needs qualification.
+    ignore:
+      - dependency-name: 'arrow-*'
+        update-types:
+          - version-update:semver-major
     groups:
       # These crates exchange Arrow types and need coordinated version updates.
       arrow:
         patterns:
           - 'arrow-*'
+          - clickhouse
           - clickhouse-ext-arrow
       other-minor-and-patch:
         patterns:
           - '*'
         exclude-patterns:
           - 'arrow-*'
+          - clickhouse
           - clickhouse-ext-arrow
         update-types:
           - minor
