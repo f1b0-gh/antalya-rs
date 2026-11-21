@@ -290,7 +290,7 @@ impl<'de> Deserialize<'de> for Claims {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Cause, ExecutionLimits, ResourceLimits, resources::Lane};
+    use crate::{Cause, Error, ExecutionLimits, ResourceLimits, resources::Lane};
     use std::{
         future::Future,
         task::{Context, Poll, Waker},
@@ -321,32 +321,41 @@ mod tests {
         let profile = JwtReceiverProfile::new(endpoint, "issuer", "audience", "fixture", 0)?;
         let selected = base.with_jwt_receiver(profile,
             "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJpc3N1ZXIiLCJhdWQiOiJhdWRpZW5jZSIsInN1YiI6ImZpeHR1cmUiLCJleHAiOjQxMDI0NDQ4MDB9.c2ln")?;
-        assert_eq!(base.config.database, selected.config.database);
-        assert_eq!(base.config.timeout, selected.config.timeout);
-        assert_eq!(
-            base.config.execution_limits,
-            selected.config.execution_limits
-        );
-        assert_eq!(base.config.terminal_policy, selected.config.terminal_policy);
-        assert_eq!(base.config.receiver_refuses_by(), None);
-        assert_eq!(selected.config.receiver_refuses_by(), Some(4_102_444_801));
-        let deadline = || Instant::now() + Duration::from_secs(2);
-        for lane in [Lane::Data, Lane::Control, Lane::Export] {
-            let lease = base.resources.acquire(lane, deadline()).await?;
-            assert!(matches!(selected.resources.acquire(lane, deadline()).await,
-                Err(ref error) if error.cause() == Some(Cause::Capacity)));
-            drop(lease);
-            drop(selected.resources.acquire(lane, deadline()).await?);
-        }
-        let retained = base.resources.reserve_bytes(8, deadline()).await?;
-        let mut wait = Box::pin(selected.resources.reserve_bytes(1, deadline()));
         assert!(matches!(
-            wait.as_mut().poll(&mut Context::from_waker(Waker::noop())),
-            Poll::Pending
+            selected.with_bearer("opaque"),
+            Err(Error::Unsupported)
         ));
-        drop(retained);
-        let byte = wait.await?;
-        assert_eq!(byte.num_permits(), 1);
+        for (selected, expiry) in [
+            (base.with_bearer("rotated")?, None),
+            (selected, Some(4_102_444_801)),
+        ] {
+            assert_eq!(base.config.database, selected.config.database);
+            assert_eq!(base.config.timeout, selected.config.timeout);
+            assert_eq!(
+                base.config.execution_limits,
+                selected.config.execution_limits
+            );
+            assert_eq!(base.config.terminal_policy, selected.config.terminal_policy);
+            assert_eq!(base.config.receiver_refuses_by(), None);
+            assert_eq!(selected.config.receiver_refuses_by(), expiry);
+            let deadline = || Instant::now() + Duration::from_secs(2);
+            for lane in [Lane::Data, Lane::Control, Lane::Export] {
+                let lease = base.resources.acquire(lane, deadline()).await?;
+                assert!(matches!(selected.resources.acquire(lane, deadline()).await,
+                Err(ref error) if error.cause() == Some(Cause::Capacity)));
+                drop(lease);
+                drop(selected.resources.acquire(lane, deadline()).await?);
+            }
+            let retained = base.resources.reserve_bytes(8, deadline()).await?;
+            let mut wait = Box::pin(selected.resources.reserve_bytes(1, deadline()));
+            assert!(matches!(
+                wait.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Pending
+            ));
+            drop(retained);
+            let byte = wait.await?;
+            assert_eq!(byte.num_permits(), 1);
+        }
         Ok(())
     }
 }

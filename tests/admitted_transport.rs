@@ -585,3 +585,37 @@ async fn live_admitted_transport_preserves_receipt_and_large_and_empty_arrow() -
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn bearer_replacement_preserves_prepared_credentials_and_shared_admission() -> Result<()> {
+    let server = Server::new(stream(1), 2, false, 200);
+    let base = client(&server, Duration::from_secs(3))?;
+    let prepared = base.prepare_authorized_arrow(request(&server)?).await?;
+    let selected = base.with_bearer("rotated")?;
+    let refused = selected.prepare_authorized_arrow(request(&server)?).await;
+    assert!(matches!(refused, Err(error) if error.cause() == Some(antalya_rs::Cause::Capacity)));
+    let mut execution = prepared.start()?;
+    while execution.next_batch().await?.is_some() {}
+    let mut execution = selected
+        .prepare_authorized_arrow(request(&server)?)
+        .await?
+        .start()?;
+    while execution.next_batch().await?.is_some() {}
+    let captured = server
+        .requests
+        .lock()
+        .map_err(|_| io::Error::other("fixture mutex poisoned"))?;
+    let data: Vec<_> = captured.iter().filter(|r| r.contains("SELECT v")).collect();
+    assert_eq!(data.len(), 2);
+    assert!(
+        data[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer token\r\n")
+    );
+    assert!(
+        data[1]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer rotated\r\n")
+    );
+    Ok(())
+}

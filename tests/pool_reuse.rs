@@ -20,12 +20,14 @@ enum RequestKind {
     Observe,
 }
 
+type CapturedRequest = (usize, RequestKind, String);
+
 struct PersistentServer {
     address: SocketAddr,
     endpoint: Endpoint,
     stop: Arc<AtomicBool>,
     sockets: Arc<Mutex<Vec<TcpStream>>>,
-    requests: Arc<Mutex<Vec<(usize, RequestKind)>>>,
+    requests: Arc<Mutex<Vec<CapturedRequest>>>,
     failures: Arc<Mutex<Vec<String>>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -115,12 +117,13 @@ impl Drop for PersistentServer {
     }
 }
 
-fn request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<Vec<u8>>> {
+fn request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<(Vec<u8>, String)>> {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(None);
     }
     let mut length = None;
+    let mut authorization = String::new();
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -130,6 +133,9 @@ fn request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<Vec<u8>>> {
             break;
         }
         let lower = line.to_ascii_lowercase();
+        if lower.starts_with("authorization:") {
+            authorization = line["authorization:".len()..].trim().to_owned();
+        }
         if let Some(value) = lower.strip_prefix("content-length:") {
             length = Some(value.trim().parse::<usize>().map_err(io::Error::other)?);
         }
@@ -145,16 +151,16 @@ fn request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<Vec<u8>>> {
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
-    Ok(Some(body))
+    Ok(Some((body, authorization)))
 }
 
 fn serve(
     socket: TcpStream,
     connection: usize,
-    requests: &Mutex<Vec<(usize, RequestKind)>>,
+    requests: &Mutex<Vec<CapturedRequest>>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(socket);
-    while let Some(body) = request(&mut reader)? {
+    while let Some((body, authorization)) = request(&mut reader)? {
         let sql = String::from_utf8(body).map_err(io::Error::other)?;
         let (kind, reply): (_, &[u8]) = if sql.contains("FROM system.query_log") {
             (RequestKind::Observe, br#"{"data":[{"starts":1,"finishes":1,"errors":0,"cancelled":0,"result_rows":0,"read_rows":0,"read_bytes":0}]}"#)
@@ -165,7 +171,10 @@ fn serve(
         } else {
             return Err(io::Error::other("unexpected fixture SQL"));
         };
-        requests.lock().unwrap().push((connection, kind));
+        requests
+            .lock()
+            .unwrap()
+            .push((connection, kind, authorization));
         write!(
             reader.get_mut(),
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
@@ -177,7 +186,11 @@ fn serve(
     Ok(())
 }
 
-async fn check_pool(max_idle_per_host: usize, expected_requests_per_connection: &[usize]) {
+async fn check_pool(
+    max_idle_per_host: usize,
+    expected_requests_per_connection: &[usize],
+    rotate: bool,
+) {
     let server = PersistentServer::new();
     let client = AntalyaClient::new(
         Config::new(
@@ -191,8 +204,18 @@ async fn check_pool(max_idle_per_host: usize, expected_requests_per_connection: 
         }),
     )
     .unwrap();
-    let clone = client.clone();
-    for (index, client) in [&client, &clone].into_iter().enumerate() {
+    let clone = if rotate {
+        client.with_bearer("rotated").unwrap()
+    } else {
+        client.clone()
+    };
+    let clients = if rotate {
+        vec![&client, &clone, &client]
+    } else {
+        vec![&client, &clone]
+    };
+    let rounds = clients.len();
+    for (index, client) in clients.into_iter().enumerate() {
         // Each completed command includes two network round trips on the control
         // client, allowing the separate upstream connection to return to its pool.
         let report = client
@@ -206,7 +229,15 @@ async fn check_pool(max_idle_per_host: usize, expected_requests_per_connection: 
         assert_eq!(report.metrics.polls, 1);
     }
     let requests = server.requests.lock().unwrap().clone();
-    assert_eq!(requests.len(), 6);
+    assert_eq!(requests.len(), rounds * 3);
+    for (index, (_, _, authorization)) in requests.iter().enumerate() {
+        let expected = if rotate && index / 3 == 1 {
+            "Bearer rotated"
+        } else {
+            "Bearer token"
+        };
+        assert_eq!(authorization, expected);
+    }
     for kind in [
         RequestKind::Command,
         RequestKind::Flush,
@@ -215,13 +246,13 @@ async fn check_pool(max_idle_per_host: usize, expected_requests_per_connection: 
         assert_eq!(
             requests
                 .iter()
-                .filter(|(_, actual)| *actual == kind)
+                .filter(|(_, actual, _)| *actual == kind)
                 .count(),
-            2
+            rounds
         );
     }
     let mut by_connection = BTreeMap::new();
-    for (connection, _) in requests {
+    for (connection, _, _) in requests {
         *by_connection.entry(connection).or_insert(0usize) += 1;
     }
     let mut counts: Vec<_> = by_connection.into_values().collect();
@@ -233,10 +264,15 @@ async fn check_pool(max_idle_per_host: usize, expected_requests_per_connection: 
 
 #[tokio::test]
 async fn configured_pool_reuses_upstream_and_control_connections_across_clones() {
-    check_pool(2, &[2, 4]).await;
+    check_pool(2, &[2, 4], false).await;
 }
 
 #[tokio::test]
 async fn disabling_idle_pool_disables_upstream_and_control_reuse() {
-    check_pool(0, &[1, 1, 1, 1, 1, 1]).await;
+    check_pool(0, &[1, 1, 1, 1, 1, 1], false).await;
+}
+
+#[tokio::test]
+async fn bearer_replacement_reuses_both_pools_and_keeps_original_view_usable() {
+    check_pool(2, &[3, 6], true).await;
 }

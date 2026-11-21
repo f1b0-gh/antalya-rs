@@ -187,3 +187,38 @@ fn zero_queue_and_disabled_idle_pool_are_valid() {
         });
     assert!(AntalyaClient::new(config).is_ok());
 }
+
+#[test]
+fn bearer_replacement_is_validated_redacted_and_preserves_existing_requests() {
+    let base = AntalyaClient::new(
+        Config::new(endpoint(), Credentials::bearer("original-secret").unwrap())
+            .database("events")
+            .unwrap(),
+    )
+    .unwrap();
+    let query = Query::new("SELECT 1", "rotated-request").unwrap();
+    let original = base.build_request(&query, Format::Json).unwrap();
+    for invalid in ["", " ", "bad:token", "token\r\nheader"] {
+        assert_eq!(
+            base.with_bearer(invalid).unwrap_err(),
+            antalya_rs::Error::InvalidCredentials
+        );
+    }
+    let selected = base.with_bearer("rotated-secret==").unwrap();
+    let request = selected.build_request(&query, Format::Json).unwrap();
+    assert_eq!(
+        request.headers()["Authorization"],
+        "Bearer rotated-secret=="
+    );
+    assert!(request.headers()["Authorization"].is_sensitive());
+    assert_eq!(
+        original.headers()["Authorization"],
+        "Bearer original-secret"
+    );
+    assert_eq!(
+        base.build_request(&query, Format::Json).unwrap().headers()["Authorization"],
+        "Bearer original-secret"
+    );
+    assert_eq!(original.url(), request.url());
+    assert!(!format!("{selected:?}").contains("rotated-secret"));
+}

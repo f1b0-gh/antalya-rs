@@ -141,7 +141,7 @@ impl Config {
             database: None,
             timeout: Duration::from_secs(60),
             read_timeout: None,
-            capacity_wait_timeout: None,
+            capacity_wait_timeout: Some(Duration::from_secs(1)),
             pool: PoolOptions::default(),
             resources: ResourceLimits::default(),
             execution_limits: ExecutionLimits::default(),
@@ -190,8 +190,8 @@ impl Config {
         self
     }
     /// Bound waiting for a full shared byte reservation. Zero refuses immediately
-    /// when insufficient capacity is available. Disabled by default, so retained
-    /// output can apply backpressure until release or the total operation deadline.
+    /// when insufficient capacity is available. Defaults to one second. Configure
+    /// a longer wait for deliberate backpressure; the total deadline still applies.
     pub fn capacity_wait_timeout(mut self, timeout: Duration) -> Self {
         self.capacity_wait_timeout = Some(timeout);
         self
@@ -305,6 +305,28 @@ impl AntalyaClient {
             resources,
         })
     }
+    /// Select a bearer for future operations, sharing existing connection pools,
+    /// admission limits and retained-byte capacity. Existing clones and prepared
+    /// executions keep their credentials and deadlines. Performs no I/O or replay.
+    ///
+    /// Returns `Error::Unsupported` for a receiver-aware JWT client: use
+    /// `with_jwt_receiver` with a reviewed profile to preserve its constraints.
+    /// Invalid bearer syntax returns `Error::InvalidCredentials`.
+    pub fn with_bearer(&self, bearer: &str) -> Result<Self, Error> {
+        #[cfg(feature = "arrow")]
+        if self.config.receiver_expiry.is_some() {
+            return Err(Error::Unsupported);
+        }
+        let credentials = Credentials::bearer(bearer)?;
+        let mut client = self.clone();
+        client.config.credentials = credentials;
+        #[cfg(feature = "arrow")]
+        {
+            client.upstream = client.upstream.with_access_token(bearer);
+        }
+        Ok(client)
+    }
+
     pub fn build_request(&self, query: &Query, format: Format) -> Result<reqwest::Request, Error> {
         self.scoped(query).build_request(
             &self.http,
