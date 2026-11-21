@@ -1,0 +1,10 @@
+/target/
+/.jj/
+/.agents/
+/.codex/
+/.aws/
+
+__pycache__/
+
+# Private review notes and historical development artifacts.
+/.local/

@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '2'
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  rust:
+    name: Tests (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: HTTP
+            flags: --no-default-features
+          - name: HTTP with TLS
+            flags: --no-default-features --features tls
+          - name: Arrow
+            flags: ''
+          - name: Arrow with TLS
+            flags: --all-features
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: 1.99.1
+      - run: cargo test --locked ${{ matrix.flags }}
+
+  quality:
+    name: Format, Clippy, docs and package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features --no-deps -- -D warnings
+      - run: cargo doc --locked --all-features --no-deps
+      - name: Check package contents
+        run: |
+          cargo package --locked --list > "$RUNNER_TEMP/package-files.txt"
+          python3 - "$RUNNER_TEMP/package-files.txt" <<'PY'
+          from pathlib import Path
+          import sys
+          files = Path(sys.argv[1]).read_text().splitlines()
+          assert files, "empty package inventory"
+          assert not any(p.startswith((".local/", ".jj/", ".aws/", ".codex/", ".agents/")) or "__pycache__" in p for p in files), "private files in package"
+          PY
+
+  server:
+    name: Server (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: query-log completion
+            fixture: ''
+            tests: --test live_qualification --test admitted_transport --test admitted_ipc --test admitted_arrow --test prepared_command
+          - name: framed completion
+            fixture: --framed
+            tests: --test in_band
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: 1.99.1
+      - name: Compile live tests before starting the fixture
+        run: cargo test --locked --all-features ${{ matrix.tests }} --no-run
+      - name: Run digest-pinned server qualification
+        run: python3 scripts/fixture.py ${{ matrix.fixture }} cargo test --locked --all-features ${{ matrix.tests }} -- --ignored --test-threads=1
