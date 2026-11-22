@@ -95,6 +95,8 @@ jobs:
           assert files, "empty package inventory"
           assert not any(p.startswith((".local/", ".jj/", ".aws/", ".codex/", ".agents/")) or "__pycache__" in p for p in files), "private files in package"
           PY
+      - name: Verify the publication package
+        run: cargo publish --dry-run --locked --all-features
 
   server:
     name: Server (${{ matrix.name }})

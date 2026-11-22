@@ -4,10 +4,15 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
-description = "Async Rust client for Antalya"
+description = "Community client for Antalya database"
 repository = "https://github.com/f1b0-gh/antalya-rs"
-documentation = "https://github.com/f1b0-gh/antalya-rs/blob/main/docs/client.md"
+documentation = "https://docs.rs/antalya-rs"
+keywords = ["clickhouse", "antalya", "arrow", "iceberg"]
+categories = ["database", "api-bindings"]
 exclude = [".local/**", "**/__pycache__/**"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = ["arrow"]

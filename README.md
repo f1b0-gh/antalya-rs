@@ -2,22 +2,22 @@
 
 [![CI](https://github.com/f1b0-gh/antalya-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/f1b0-gh/antalya-rs/actions/workflows/ci.yml)
 
+Community client for Antalya database.
+
 Bearer-authenticated HTTP and Apache Arrow integration for Altinity Antalya.
 The crate combines the official ClickHouse client and Arrow readers with explicit query completion, resource limits, and validated
 IPC exports. Authorization and token acquisition belong to your application.
+This is an unofficial client, maintained independently of Altinity.
 
 ## Getting started
 
-Add the GitHub source to your application (no crates.io release is required):
+Add the crate to your application:
 
 ```toml
 [dependencies]
-antalya-rs = { git = "https://github.com/f1b0-gh/antalya-rs", features = ["tls"] }
+antalya-rs = { version = "0.1", features = ["tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
-
-Cargo records the resolved Git revision in your lockfile. Use a `rev` requirement
-when you need to select a particular reviewed commit.
 
 The default `arrow` feature enables streaming queries, execution tracking, and
 IPC exports. Enable `tls` for HTTPS with system trust. Use
@@ -79,11 +79,26 @@ and cancellation still use query-log observation.
 The default fixture targets `26.6.8.20004.altinityantalya`. The optional `InBand`
 strategy uses framed HTTP completion on a separate compatible server fixture;
 see the [client guide](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/client.md#measured-arrow-transport-and-framed-completion).
-Arrow dependencies are pinned to **59.3.3**. Consumers exchanging `RecordBatch`
-values must use compatible Arrow crate versions. Project Dynamic/JSON values
-explicitly in SQL when an Arrow representation is needed.
+Project Dynamic/JSON values explicitly in SQL when an Arrow representation is
+needed.
+
+## Tested setup
+
+| Component | Version | Why we keep it fixed |
+|---|---|---|
+| Rust | **1.99.1** | Our tested compiler and declared minimum; one baseline for builds, tests, Clippy, and documentation. |
+| Arrow / ClickHouse crates | **59.3.3 / 0.15.3** | Qualified together for HTTP transport and Arrow IPC decoding. Exact pins preserve the tested combination and keep Rust Arrow types aligned. |
+
+Version **0.1 makes no compatibility claim beyond this tested setup**, including
+the server fixtures and feature matrix in [testing](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/testing.md).
+Consumers exchanging `RecordBatch` values must resolve the same Arrow release.
+Dependency upgrades are qualified together through the
+[update policy](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/testing.md#arrow-compatibility).
 
 ## API guide
+
+See the [API reference](https://docs.rs/antalya-rs) for public types and methods.
+To build it locally, use the command below.
 
 Start with `AntalyaClient::fetch_arrow` and `Execution::next_batch`, or `export`
 for validated Arrow files. Prepared/admitted execution and recovery receipts are
