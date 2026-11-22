@@ -15,6 +15,7 @@ cargo test --locked --no-default-features
 cargo test --locked --no-default-features --features tls
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
+cargo publish --dry-run --locked --all-features
 ```
 
 The tests exercise request construction, bearer handling, typed parameters,
@@ -24,13 +25,18 @@ need permission to bind local sockets. Live server tests are marked `ignored`
 and run separately; a successful default test run does not execute them.
 
 The [GitHub Actions workflow](../.github/workflows/ci.yml) defines the four feature
-combinations above, formatting, strict Clippy, rustdoc and package-content checks,
+combinations above, formatting, strict Clippy, rustdoc, package-content checks,
+and a publish dry run that builds from the packaged files without uploading,
 and separate query-log and framed server jobs. The query-log job also runs the
 admitted transport, IPC, Arrow decoder and prepared-command live tests. Both
 server jobs run the restrictive-user and Catalog deployment qualification.
 CI runs on pushes to `main`, pull requests, and manual dispatch.
 See the [Actions runs](https://github.com/f1b0-gh/antalya-rs/actions/workflows/ci.yml)
 for executed results.
+
+The publish dry run requires a clean working tree and registry access. It verifies
+the archive's build, while the feature matrix and server jobs exercise behavior.
+The docs.rs build enables all features, including TLS.
 
 ## Arrow compatibility
 
