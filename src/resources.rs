@@ -238,7 +238,7 @@ mod tests {
         let short = Instant::now() + Duration::from_millis(2);
         assert_eq!(
             resources.reserve_bytes(1, short).await.unwrap_err().cause(),
-            Some(Cause::CapacityTimeout)
+            Some(Cause::Timeout)
         );
         drop(bytes);
         assert_eq!(
@@ -318,10 +318,7 @@ mod tests {
         assert!(matches!(waiter.as_mut().poll(&mut cx), Poll::Pending));
         drop(active);
         tokio::time::sleep_until(expires + Duration::from_millis(1)).await;
-        assert_eq!(
-            waiter.await.unwrap_err().cause(),
-            Some(Cause::CapacityTimeout)
-        );
+        assert_eq!(waiter.await.unwrap_err().cause(), Some(Cause::Timeout));
         assert_eq!(
             resources
                 .reserve_bytes(8, deadline())

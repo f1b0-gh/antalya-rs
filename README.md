@@ -104,6 +104,11 @@ or reconciliation after a lost response.
 - [Host authorization](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/client.md#host-authorization) and
   [SQL helpers](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/client.md#sql-helpers): frozen requests and typed DDL builders.
 
+**Defaults admit 16 queries but fund only four simultaneous high-level batch
+reads:** each pending read reserves 16 MiB from the shared 64 MiB budget. Retained
+output and other byte reservations can lower that further. Tune `max_batch_bytes`
+and `max_retained_bytes` together with `max_active_queries`.
+
 Keep `BudgetedBatch` wrappers while retaining their arrays. When retained output
 prevents a full reservation fitting, `capacity_wait_timeout` limits the wait to
 one second by default. Waiting on other queries' pending reads uses the operation

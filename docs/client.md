@@ -94,10 +94,11 @@ A waiter observing only active work resets its retention wait budget. Zero refus
 value allows more backpressure. Cancelling and restarting a reservation wait can
 restart this timer, but cannot extend the operation deadline.
 
-Capacity expiry reports `ErrorKind::LimitExceeded` / `Cause::CapacityTimeout`.
-Read inactivity reports `Cause::ReadTimeout`; other operation expiry reports
-`Cause::Timeout`. A byte wait that reaches the operation deadline also reports
-`CapacityTimeout`.
+A retained-output wait expiring reports `ErrorKind::LimitExceeded` /
+`Cause::CapacityTimeout`. The blocking output may belong to any query sharing the
+client, including another clone or credential view. Read inactivity reports
+`Cause::ReadTimeout`. Reaching the total operation deadline reports
+`ErrorKind::Timeout` / `Cause::Timeout`, including while waiting for byte capacity.
 
 | Configuration | Defaults | Scope |
 |---|---|---|
@@ -108,8 +109,18 @@ Read inactivity reports `Cause::ReadTimeout`; other operation expiry reports
 
 Reservations are atomic and acquired before reading/decoding. A blocked large
 claim leaves free capacity available to smaller claims; admission is not FIFO.
-The high-level reader reserves one maximum batch while waiting for data. With
-defaults, four readers can hold those reservations simultaneously; others wait.
+The high-level reader reserves `max_batch_bytes` before waiting for data. Query
+admission and pending-read concurrency are separate limits. With no other byte
+reservations, at most
+`min(max_active_queries, max_retained_bytes / max_batch_bytes)` reads can hold
+reservations at once (integer division). **Defaults admit 16 queries but fund
+only four simultaneous reads**: 64 MiB / 16 MiB. Retained output, exports and
+admitted decoder buffers reduce the capacity available for those reads.
+
+For up to 16 pending reads, a 64 MiB budget with 4 MiB maximum batches, or a
+256 MiB budget with 16 MiB maximum batches, provides the reservation capacity
+before other storage is counted. Lower the batch limit only when actual batches
+fit it; allow additional shared capacity for output consumers keep.
 
 Consume and drop batches to stream more than the shared budget. Collecting results
 requires room for the collection plus the next full reservation. `BudgetedBatch`

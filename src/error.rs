@@ -39,7 +39,7 @@ pub enum Cause {
     Timeout,
     /// No response data arrived within the configured read inactivity timeout.
     ReadTimeout,
-    /// Shared retained-output capacity was unavailable before its wait deadline.
+    /// Retained output across queries sharing the client exhausted the capacity-wait budget.
     CapacityTimeout,
     Capacity,
     LimitExceeded,
@@ -68,7 +68,7 @@ impl fmt::Display for Cause {
             Self::Io(kind) => write!(f, "I/O failure ({kind:?})"),
             Self::Timeout => f.write_str("operation deadline elapsed"),
             Self::ReadTimeout => f.write_str("response read inactivity deadline elapsed"),
-            Self::CapacityTimeout => f.write_str("shared capacity wait deadline elapsed; release retained output or increase capacity"),
+            Self::CapacityTimeout => f.write_str("shared retained-output wait deadline elapsed; output held by this or other queries sharing the client is blocking capacity"),
             Self::Capacity => f.write_str("insufficient shared capacity"),
             Self::LimitExceeded => f.write_str("configured resource limit exceeded"),
             Self::InvalidProof => f.write_str("terminal evidence is incomplete or invalid"),
