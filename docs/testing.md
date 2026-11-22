@@ -116,6 +116,14 @@ results, multiple batches, intermediate progress, late exceptions, and bearer
 rejection. The deployment suite also runs against this build in CI. The default server lacks the required framing setting; the client
 does not silently fall back to query-log completion in `InBand` mode.
 
+The framed server job also runs `arrow_compression::native_zstd_values_and_late_errors`
+against both query-log and in-band completion. It checks empty and multi-batch
+results, exact values and late-error refusal with Zstd enabled. Run it alone with:
+
+```sh
+python3 scripts/fixture.py --framed cargo test --locked --test arrow_compression -- --ignored --test-threads=1
+```
+
 The framing protocol is documented in the upstream [ClickHouse 26.8 release
 presentation](https://presentations.clickhouse.com/2026-release-26.8/) and
 [streaming HTTP API description](https://clickhouse.com/blog/clickhouse-streaming-http-api).

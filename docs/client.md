@@ -317,7 +317,51 @@ a query-log round trip or fallback.
 The default 26.6 fixture lacks `framing_output_format`; use the separate compatible
 fixture to qualify this mode. Commands and admitted transports reject `InBand`
 before dispatch. Query logging remains enabled for explicit recovery/cancellation.
-The measured decoder validates metadata, layouts and dictionary growth, requests
-uncompressed IPC and rejects compressed bodies before expansion.
+The measured decoder validates metadata, layouts and dictionary growth. By default
+it requests uncompressed IPC and rejects compressed bodies before expansion.
+
+### Optional Zstd IPC compression
+
+```rust,no_run
+# use antalya_rs::{AntalyaClient, ArrowCompression, Config, Credentials, Endpoint};
+# fn example() -> Result<(), antalya_rs::Error> {
+let config = Config::new(
+    Endpoint::parse("http://localhost:8123")?,
+    Credentials::bearer("token")?,
+).arrow_compression(ArrowCompression::Zstd);
+let client = AntalyaClient::new(config)?;
+# Ok(()) }
+```
+
+This option applies to high-level Arrow `Execution`, with either query-log or
+`InBand` completion. Raw/admitted transport and export APIs retain their existing
+profiles. It does not enable HTTP content compression. The client owns this
+setting: a per-query `output_format_arrow_compression_method` cannot override it.
+Uncompressed responses are also accepted; LZ4 and unknown codecs are refused.
+
+Before Arrow sees a compressed message, the client buffers at most one IPC
+message, bounds its metadata to 64 KiB and its encoded body to
+`max_batch_bytes`, and checks all buffer offsets and declared expanded lengths.
+Their sum must fit `max_batch_bytes`; the existing logical-layout and dictionary
+growth checks then run against those expanded lengths. Arrow's Zstd decoder
+uses bounded single-shot decompression and checks actual output length. The
+same terminal proof, cancellation and retained-batch rules still apply.
+
+A pending compressed read reserves `2 * max_batch_bytes + 512 KiB` atomically
+from `ResourceLimits::max_retained_bytes`, covering encoded staging, expanded
+output and metadata scratch. Invalid capacity is rejected when constructing the
+client. Returned batches release unused reservation and retain their ordinary
+storage charge. At the default limits, this allows one pending compressed read
+per shared client rather than four uncompressed reads. This budget is not a
+process-RSS bound: HTTP buffers, codec context, schema/dictionary state and runtime
+allocations also exist. Retain the `BudgetedBatch` owner while using its arrays.
+
+Compression adds CPU and staging costs and may reduce bytes transferred; benchmark
+your data and concurrency before enabling it. `decode` includes preflight and
+decompression, while `wire_bytes` retains its HTTP-entity meaning. The Arrow
+[compression format](https://arrow.apache.org/docs/format/Columnar.html#compression)
+and Zstd's [single-shot memory model](https://github.com/facebook/zstd/wiki/Using-libzstd-in-a-memory-constrained-environment)
+explain the bounds used here. LZ4 support would require a separately bounded
+decoder path; it is not enabled by relaxing the existing guard.
 
 See [testing](testing.md) for fixture versions and reproducible commands.

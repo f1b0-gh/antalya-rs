@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Measured high-level Arrow path. The admitted transport remains independent.
+mod compressed;
+#[cfg(test)]
+mod compressed_tests;
 mod framing;
 mod ipc_guard;
 use super::Progress;
@@ -27,6 +30,8 @@ pub(super) struct MeasuredCursor {
     source: Source,
     decoder: StreamDecoder,
     buffer: Buffer,
+    wire_buffer: Buffer,
+    compressed: Option<compressed::Guard>,
     guard: ipc_guard::Guard,
     metrics: Measurements,
     wire_limit: u64,
@@ -42,7 +47,11 @@ impl MeasuredCursor {
             Source::Plain(
                 query
                     .upstream(&client.upstream)
-                    .with_setting("output_format_arrow_compression_method", "none")
+                    .with_setting(
+                        "output_format_arrow_compression_method",
+                        client.config.arrow_compression.setting(),
+                    )
+                    .with_setting("enable_http_compression", "0")
                     .fetch_bytes("ArrowStream")
                     .map_err(|e| Error::from_upstream(Phase::Data, &e))?,
             )
@@ -51,6 +60,9 @@ impl MeasuredCursor {
             source,
             decoder: StreamDecoder::new(),
             buffer: Buffer::default(),
+            wire_buffer: Buffer::default(),
+            compressed: (client.config.arrow_compression == crate::ArrowCompression::Zstd)
+                .then(|| compressed::Guard::new(limits.max_batch_bytes)),
             guard: ipc_guard::Guard::new(limits.max_batch_bytes),
             metrics: Measurements::default(),
             wire_limit: limits
@@ -92,8 +104,21 @@ impl MeasuredCursor {
                     .map_err(|_| Error::at(Phase::Data, Cause::Decoder));
                 self.metrics.decode = self.metrics.decode.saturating_add(start.elapsed());
                 if let Some(batch) = result? {
+                    if self.compressed.is_some() && self.buffer.is_empty() {
+                        self.buffer = Buffer::default();
+                    }
                     return Ok(Some(batch));
                 }
+            }
+            if let Some(guard) = &mut self.compressed {
+                let start = Instant::now();
+                let result = guard.next(&mut self.wire_buffer);
+                self.metrics.decode = self.metrics.decode.saturating_add(start.elapsed());
+                if let Some(frame) = result? {
+                    self.buffer = frame;
+                    continue;
+                }
+                self.wire_buffer = Buffer::default();
             }
             let next = match &mut self.source {
                 Source::Plain(cursor) => {
@@ -113,6 +138,10 @@ impl MeasuredCursor {
             match next {
                 Some(bytes) => {
                     let start = Instant::now();
+                    if self.compressed.is_some() {
+                        self.wire_buffer = bytes.into();
+                        continue;
+                    }
                     let valid = self.guard.feed(&bytes);
                     self.metrics.decode = self.metrics.decode.saturating_add(start.elapsed());
                     valid?;
@@ -126,7 +155,13 @@ impl MeasuredCursor {
                         .map_err(|_| Error::at(Phase::Data, Cause::Decoder));
                     self.metrics.decode = self.metrics.decode.saturating_add(start.elapsed());
                     valid?;
-                    if matches!(self.source, Source::Framed(_)) && !self.guard.ended() {
+                    if let Some(guard) = &self.compressed {
+                        guard.finish()?;
+                    }
+                    if self.compressed.is_none()
+                        && matches!(self.source, Source::Framed(_))
+                        && !self.guard.ended()
+                    {
                         return Err(Error::at(Phase::Control, Cause::InvalidProof));
                     }
                     self.ended = true;

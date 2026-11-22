@@ -332,7 +332,10 @@ impl Execution {
             let reserved = timed(
                 &mut self.metrics.queued,
                 self.client.resources.reserve_active(
-                    self.client.config.execution_limits.max_batch_bytes,
+                    self.client
+                        .config
+                        .read_reservation()
+                        .ok_or(Error::InvalidSetting)?,
                     self.deadline,
                 ),
             )

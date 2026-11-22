@@ -76,7 +76,8 @@ pub struct ExecutionLimits {
     pub max_total_bytes: u64,
     /// Allocation capacities deduplicated within a batch, plus conservative
     /// array metadata. Independently retained batches are charged separately.
-    /// High-level reads reserve this amount before polling the network.
+    /// High-level reads reserve this amount before polling the network; Zstd
+    /// reads reserve twice this amount plus 512 KiB for bounded staging.
     pub max_batch_bytes: usize,
 }
 impl Default for ExecutionLimits {
@@ -86,6 +87,27 @@ impl Default for ExecutionLimits {
             max_batches: 65_536,
             max_total_bytes: 512 * 1024 * 1024,
             max_batch_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
+/// IPC compression for high-level Arrow executions only. Raw/admitted APIs
+/// keep their uncompressed contract. Per-query settings cannot override this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArrowCompression {
+    #[default]
+    None,
+    /// Bounded Zstd preflight; requires room for twice max_batch_bytes plus
+    /// 512 KiB metadata scratch in the shared retained-byte budget per read.
+    /// LZ4 is deliberately unsupported by this bounded profile.
+    Zstd,
+}
+impl ArrowCompression {
+    #[cfg(feature = "arrow")]
+    pub(crate) fn setting(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zstd => "zstd",
         }
     }
 }
@@ -134,6 +156,7 @@ pub struct Config {
     pub(crate) resources: ResourceLimits,
     pub(crate) execution_limits: ExecutionLimits,
     pub(crate) terminal_policy: TerminalPolicy,
+    pub(crate) arrow_compression: ArrowCompression,
     #[cfg(feature = "arrow")]
     pub(crate) receiver_expiry: Option<crate::receiver::ReceiverExpiry>,
 }
@@ -150,6 +173,7 @@ impl Config {
             resources: ResourceLimits::default(),
             execution_limits: ExecutionLimits::default(),
             terminal_policy: TerminalPolicy::default(),
+            arrow_compression: ArrowCompression::None,
             #[cfg(feature = "arrow")]
             receiver_expiry: None,
         }
@@ -173,6 +197,19 @@ impl Config {
     pub fn terminal_policy(mut self, policy: TerminalPolicy) -> Self {
         self.terminal_policy = policy;
         self
+    }
+    /// Opt in to bounded IPC compression for high-level Arrow executions.
+    /// Defaults to uncompressed. Does not enable HTTP content compression.
+    pub fn arrow_compression(mut self, compression: ArrowCompression) -> Self {
+        self.arrow_compression = compression;
+        self
+    }
+    pub(crate) fn read_reservation(&self) -> Option<usize> {
+        let bytes = self.execution_limits.max_batch_bytes;
+        match self.arrow_compression {
+            ArrowCompression::None => Some(bytes),
+            ArrowCompression::Zstd => bytes.checked_mul(2)?.checked_add(512 * 1024),
+        }
     }
     pub fn database(mut self, database: &str) -> Result<Self, Error> {
         self.database = Query::new("SELECT 1", "config")?
@@ -227,7 +264,9 @@ impl AntalyaClient {
         if limits.max_rows == 0
             || limits.max_batches == 0
             || limits.max_batch_bytes == 0
-            || limits.max_batch_bytes > config.resources.max_retained_bytes
+            || config
+                .read_reservation()
+                .is_none_or(|bytes| bytes > config.resources.max_retained_bytes)
             || u64::try_from(limits.max_batch_bytes)
                 .map_or(true, |bytes| bytes > limits.max_total_bytes)
             || policy.initial_delay.is_zero()
