@@ -3,8 +3,7 @@
 [![CI](https://github.com/f1b0-gh/antalya-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/f1b0-gh/antalya-rs/actions/workflows/ci.yml)
 
 Bearer-authenticated HTTP and Apache Arrow integration for Altinity Antalya.
-The crate combines the official ClickHouse client, `clickhouse-ext-arrow`, and
-Arrow readers with explicit query completion, resource limits, and validated
+The crate combines the official ClickHouse client and Arrow readers with explicit query completion, resource limits, and validated
 IPC exports. Authorization and token acquisition belong to your application.
 
 ## Getting started

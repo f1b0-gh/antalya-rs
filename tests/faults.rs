@@ -192,11 +192,11 @@ async fn late_split_exception_remains_visible_after_delivered_batch() {
         .fetch_arrow(Query::new("SELECT 1", "late-1").unwrap())
         .await
         .unwrap();
-    assert_eq!(execution.next().await.unwrap().unwrap().num_rows(), 2);
-    assert!(execution.next().await.is_err());
+    assert_eq!(execution.next_batch().await.unwrap().unwrap().num_rows(), 2);
+    assert!(execution.next_batch().await.is_err());
     assert_eq!(execution.outcome(), Outcome::Failed);
     assert_eq!(execution.rows_delivered(), 2);
-    assert!(execution.next().await.is_err());
+    assert!(execution.next_batch().await.is_err());
     task.join().unwrap();
 }
 #[tokio::test]
@@ -211,7 +211,7 @@ async fn malformed_and_premature_http_eof_never_claim_success() {
             .await
             .unwrap();
         loop {
-            match execution.next().await {
+            match execution.next_batch().await {
                 Ok(Some(_)) => continue,
                 Err(_) => break,
                 Ok(None) => panic!("incomplete execution succeeded"),
@@ -369,7 +369,7 @@ async fn empty_kill_ack_without_terminal_server_remains_unknown() -> Result<(), 
     let mut execution = client
         .fetch_arrow(Query::new("SELECT 1", "cancel-unknown")?)
         .await?;
-    assert!(execution.next().await?.is_some());
+    assert!(execution.next_batch().await?.is_some());
     // Empty KILL acknowledgement is valid, but this fixture closes before
     // terminal observation. The transport failure must preserve uncertainty.
     let result = execution.cancel().await;
@@ -377,7 +377,7 @@ async fn empty_kill_ack_without_terminal_server_remains_unknown() -> Result<(), 
         if error.phase() == Some(antalya_rs::Phase::Control)
         && matches!(error.cause(), Some(antalya_rs::Cause::Transport(_)))));
     assert_eq!(execution.outcome(), Outcome::Unknown);
-    assert!(execution.next().await.is_err());
+    assert!(execution.next_batch().await.is_err());
     assert!(task.join().is_ok());
     Ok(())
 }
@@ -416,8 +416,8 @@ async fn readonly_completion_polls_after_flush_is_denied() {
         .fetch_arrow(Query::new("SELECT 1", "readonly-1").unwrap())
         .await
         .unwrap();
-    assert_eq!(execution.next().await.unwrap().unwrap().num_rows(), 2);
-    assert!(execution.next().await.unwrap().is_none());
+    assert_eq!(execution.next_batch().await.unwrap().unwrap().num_rows(), 2);
+    assert!(execution.next_batch().await.unwrap().is_none());
     assert_eq!(execution.outcome(), Outcome::Succeeded);
     task.join().unwrap();
 }
@@ -538,7 +538,9 @@ async fn identity_and_data_share_one_operation_deadline() {
     )
     .unwrap();
     let mut execution = client.fetch_authorized_arrow(request).await.unwrap();
-    assert!(matches!(execution.next().await, Err(error) if error.kind() == ErrorKind::Timeout));
+    assert!(
+        matches!(execution.next_batch().await, Err(error) if error.kind() == ErrorKind::Timeout)
+    );
     assert_eq!(execution.outcome(), Outcome::Unknown);
     task.join().unwrap();
 }
@@ -554,7 +556,7 @@ async fn query_finish_cannot_validate_missing_schema_or_lost_whole_batches() {
             .await
             .unwrap();
         loop {
-            match execution.next().await {
+            match execution.next_batch().await {
                 Ok(Some(_)) => continue,
                 Err(_) => break,
                 Ok(None) => panic!("incomplete response reported success"),
@@ -594,13 +596,13 @@ async fn cancellation_race_cannot_turn_undrained_results_into_success() {
         .fetch_arrow(Query::new("SELECT 1", "cancel-race").unwrap())
         .await
         .unwrap();
-    assert!(execution.next().await.unwrap().is_some());
+    assert!(execution.next_batch().await.unwrap().is_some());
     assert_eq!(
         execution.cancel().await.unwrap_err().kind(),
         ErrorKind::Unconfirmed
     );
     assert_eq!(execution.outcome(), Outcome::Unknown);
-    assert!(execution.next().await.is_err());
+    assert!(execution.next_batch().await.is_err());
     task.join().unwrap();
 }
 #[tokio::test]
@@ -643,7 +645,7 @@ async fn command_transport_errors_require_terminal_evidence() {
             .await
             .unwrap();
         assert_eq!(
-            outcome,
+            outcome.outcome,
             if terminal == SUCCESS {
                 Outcome::Succeeded
             } else if terminal == FAILED {

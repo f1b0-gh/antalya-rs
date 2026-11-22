@@ -34,17 +34,15 @@ for executed results.
 
 ## Arrow compatibility
 
-The qualified Rust dependency set is `clickhouse =0.15.3`,
-`clickhouse-ext-arrow =0.2.0`, and Arrow `=59.3.3`. The adapter declares Arrow
-`59`; all Arrow crates in the resolved graph must use the same release because
-the client and adapter exchange Rust Arrow types. CI checks the manifest pins
-and lockfile for alignment, including transitive Arrow crates.
+The qualified Rust dependency set is `clickhouse =0.15.3` and Arrow `=59.3.3`.
+All Arrow crates in the resolved graph must use the same release because the
+client exchanges Rust Arrow types with consumers. CI checks manifest pins and
+lockfile alignment, including transitive Arrow crates.
 
-Dependabot groups ClickHouse, its Arrow adapter, and Arrow updates. Arrow major
-updates are excluded from automatic proposals; moving beyond 59 requires an
-adapter that supports the new major, coordinated pin changes, and removal or
-revision of that update restriction. Patch and minor updates still require the
-full CI matrix before merging. An advisory requiring a new major needs a manual
+Dependabot groups ClickHouse and Arrow updates for joint qualification. Arrow
+major updates are excluded from automatic proposals; moving beyond 59 requires
+coordinated pin changes and revision of that update restriction. Patch and minor
+updates still require the full CI matrix before merging. An advisory requiring a new major needs a manual
 upgrade; the restriction is not a security-advisory suppression.
 
 Rust crate alignment does not establish server compatibility. The two live

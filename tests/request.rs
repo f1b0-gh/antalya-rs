@@ -164,14 +164,3 @@ fn supports_arrow_ipc_file_output() {
         b"SELECT 1\nFORMAT Arrow"
     );
 }
-
-#[cfg(feature = "arrow")]
-#[test]
-fn upstream_query_preserves_literal_question_marks() {
-    let query = Query::new("SELECT '?' -- comment", "raw-1").unwrap();
-    let upstream = query.upstream(&antalya_rs::clickhouse::Client::default());
-    assert_eq!(
-        upstream.sql_display().to_string(),
-        "SELECT '?' -- comment\n"
-    );
-}

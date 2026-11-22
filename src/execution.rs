@@ -299,11 +299,6 @@ impl Execution {
         error
     }
 
-    /// Untracked batch API. Returned arrays are outside shared retained-byte accounting.
-    /// Per-batch/cumulative limits still apply. Prefer `next_batch` for bounded consumers.
-    pub async fn next(&mut self) -> Result<Option<RecordBatch>, Error> {
-        Ok(self.next_batch().await?.map(BudgetedBatch::into_untracked))
-    }
     pub async fn next_batch(&mut self) -> Result<Option<BudgetedBatch>, Error> {
         let batch = self.next_provisional_batch().await?;
         if batch.is_none() {
@@ -797,21 +792,13 @@ impl AntalyaClient {
         format: Format,
     ) -> Result<clickhouse::query::BytesCursor, Error> {
         self.scoped(query)
-            .fetch_bytes(&self.upstream, format)
+            .upstream(&self.upstream)
+            .fetch_bytes(format.as_str())
             .map_err(|e| Error::from_upstream(Phase::Data, &e))
     }
-    pub async fn execute_command(&self, query: Query) -> Result<Outcome, Error> {
-        let report = self.execute_command_report(query).await?;
-        if let Some(error) = report
-            .metrics
-            .last_error
-            .filter(|e| e.is_pre_execution_refusal())
-        {
-            return Err(error);
-        }
-        Ok(report.outcome)
-    }
-    pub async fn execute_command_report(&self, query: Query) -> Result<CommandReport, Error> {
+    /// Execute a command and retain its outcome, timings and sanitized diagnostics.
+    /// Inspect `report.outcome`; an unconfirmed response returns an Unknown report.
+    pub async fn execute_command(&self, query: Query) -> Result<CommandReport, Error> {
         if self.config.terminal_policy.strategy == TerminalStrategy::InBand {
             return Err(Error::Unsupported);
         }
@@ -1022,7 +1009,7 @@ impl AntalyaClient {
             .parameter("id", id)?
             .parameter("nonce", nonce)?;
             if let Some(log_since) = log_since {
-                query = query.typed_parameter("log_since", crate::Parameter::UInt64(log_since))?;
+                query = query.parameter("log_since", crate::Parameter::UInt64(log_since))?;
             }
             if let Some(principal) = principal {
                 query = query.parameter("principal", principal)?;

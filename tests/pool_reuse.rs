@@ -219,7 +219,7 @@ async fn check_pool(
         // Each completed command includes two network round trips on the control
         // client, allowing the separate upstream connection to return to its pool.
         let report = client
-            .execute_command_report(
+            .execute_command(
                 Query::new("CREATE DATABASE pool_fixture", format!("pool-{index}")).unwrap(),
             )
             .await

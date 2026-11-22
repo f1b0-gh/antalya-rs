@@ -43,11 +43,6 @@ pub mod sql;
 #[cfg(feature = "arrow")]
 pub use execution::*;
 
-#[cfg(feature = "arrow")]
-pub use clickhouse;
-#[cfg(feature = "arrow")]
-pub use clickhouse_ext_arrow::{ArrowClientExt, ArrowCursor, ArrowQueryExt};
-
 /// The exact intended server qualification target, not a runtime compatibility claim.
 pub const QUALIFICATION_VERSION: &str = "26.6.8.20004.altinityantalya";
 
@@ -171,14 +166,6 @@ impl Query {
         Ok(self)
     }
 
-    pub fn typed_parameter(mut self, name: &str, value: Parameter) -> Result<Self, Error> {
-        if !identifier(name) {
-            return Err(Error::InvalidParameter);
-        }
-        self.parameters.insert(name.into(), value);
-        Ok(self)
-    }
-
     /// Set a query-local server setting, replacing any previous value.
     pub fn setting(mut self, name: &str, value: impl Into<String>) -> Result<Self, Error> {
         if !identifier(name)
@@ -216,14 +203,13 @@ impl Query {
         Ok(self)
     }
 
-    /// A string parameter for `{name:String}`; escaped for ClickHouse and HTTP.
-    /// Use `typed_parameter` for explicit non-string and nullable values.
-    pub fn parameter(mut self, name: &str, value: impl Into<String>) -> Result<Self, Error> {
+    /// A string or typed parameter; the SQL placeholder supplies the server type.
+    /// Strings are escaped for ClickHouse and HTTP. Use `Parameter` for other values.
+    pub fn parameter(mut self, name: &str, value: impl Into<Parameter>) -> Result<Self, Error> {
         if !identifier(name) {
             return Err(Error::InvalidParameter);
         }
-        self.parameters
-            .insert(name.to_owned(), Parameter::String(value.into()));
+        self.parameters.insert(name.to_owned(), value.into());
         Ok(self)
     }
 
@@ -294,11 +280,8 @@ impl Query {
             .map_err(|_| Error::InvalidRequest)
     }
 
-    /// Reuse the official client with caller-configured authentication/transport.
-    /// Escape hatch OUTSIDE the bearer-only/configured transport guarantee.
-    /// Prefer `AntalyaClient` for supported configured execution.
     #[cfg(feature = "arrow")]
-    pub fn upstream(&self, client: &clickhouse::Client) -> clickhouse::query::Query {
+    pub(crate) fn upstream(&self, client: &clickhouse::Client) -> clickhouse::query::Query {
         let mut query = client
             .query_raw(&format!("{}\n", self.sql))
             .with_setting("query_id", &self.id);
@@ -318,21 +301,6 @@ impl Query {
             };
         }
         query
-    }
-
-    /// Raw IPC bytes for saving or forwarding without decoding/re-encoding.
-    /// `Format::Arrow` selects a file; `Format::ArrowStream` selects a stream.
-    /// JSON is also accepted. This forwards unvalidated bytes. A fully drained
-    /// byte cursor is necessary but not sufficient for success: validate the IPC
-    /// artifact and establish query completion before publishing it. Transport
-    /// EOF alone does not prove valid IPC or successful server execution.
-    #[cfg(feature = "arrow")]
-    pub fn fetch_bytes(
-        &self,
-        client: &clickhouse::Client,
-        format: Format,
-    ) -> clickhouse::error::Result<clickhouse::query::BytesCursor> {
-        self.upstream(client).fetch_bytes(format.as_str())
     }
 }
 
@@ -380,5 +348,36 @@ impl Parameter {
             Self::Bool(v) => v.to_string(),
             Self::Null => "\\N".into(),
         }
+    }
+}
+
+impl From<String> for Parameter {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+impl From<&str> for Parameter {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+impl From<&String> for Parameter {
+    fn from(value: &String) -> Self {
+        Self::String(value.clone())
+    }
+}
+
+#[cfg(all(test, feature = "arrow"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_query_preserves_literal_question_marks() {
+        let query = Query::new("SELECT '?' -- comment", "raw-1").unwrap();
+        let upstream = query.upstream(&clickhouse::Client::default());
+        assert_eq!(
+            upstream.sql_display().to_string(),
+            "SELECT '?' -- comment\n"
+        );
     }
 }
