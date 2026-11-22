@@ -106,13 +106,11 @@ or reconciliation after a lost response.
   [SQL helpers](https://github.com/f1b0-gh/antalya-rs/blob/main/docs/client.md#sql-helpers): frozen requests and typed DDL builders.
 
 Keep `BudgetedBatch` wrappers while retaining their arrays. When retained output
-exhausts shared capacity, the next byte reservation waits at most one second by
-default, then reports `CapacityTimeout`. Configure `capacity_wait_timeout` for
-immediate failure or a longer wait; consume and drop batches to keep streaming.
-Accounting covers
-managed buffers; it is not a bound on total process memory. Raw transport and
-untracked batch APIs transfer validation and accounting responsibilities to the
-caller.
+prevents a full reservation fitting, `capacity_wait_timeout` limits the wait to
+one second by default. Waiting on other queries' pending reads uses the operation
+deadline. Consume and drop batches to keep streaming, or configure enough shared
+capacity for a collection plus the next batch. See the guide for accounting scope
+and explicit raw-data escape hatches.
 
 ## Examples and development
 

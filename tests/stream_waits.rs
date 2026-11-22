@@ -454,3 +454,215 @@ async fn explicit_longer_capacity_wait_allows_release_after_default_budget() {
     let (next, ()) = tokio::join!(execution.next_batch(), release);
     assert_eq!(next.unwrap().unwrap().num_rows(), 2);
 }
+
+/// Bounded simultaneous requests with headers or bodies held behind a gate. Aborting the
+/// listener drops its JoinSet and cancels every connection on test failure.
+struct SlowQueries {
+    endpoint: Endpoint,
+    arrived: tokio::sync::mpsc::Receiver<()>,
+    release: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SlowQueries {
+    async fn new(requests: usize, hold_headers: bool) -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint =
+            Endpoint::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let (arrived_tx, arrived) = tokio::sync::mpsc::channel(requests);
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let body = std::sync::Arc::new(stream(1));
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            for _ in 0..requests {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut gate = gate.clone();
+                let arrived = arrived_tx.clone();
+                let body = body.clone();
+                connections.spawn(async move {
+                    let mut request = Vec::new();
+                    loop {
+                        assert!(request.len() < 16384);
+                        let mut chunk = [0; 1024];
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        assert_ne!(n, 0);
+                        request.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..end]);
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|value| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    if String::from_utf8_lossy(&request).contains("currentUser() AS principal") {
+                        let identity = br#"{"data":[{"principal":"fixture"}]}"#;
+                        socket.write_all(format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            identity.len()
+                        ).as_bytes()).await.unwrap();
+                        socket.write_all(identity).await.unwrap();
+                        return;
+                    }
+                    arrived.send(()).await.unwrap();
+                    if hold_headers {
+                        gate.wait_for(|released| *released).await.unwrap();
+                    }
+                    socket.write_all(format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    ).as_bytes()).await.unwrap();
+                    gate.wait_for(|released| *released).await.unwrap();
+                    socket.write_all(&body).await.unwrap();
+                });
+            }
+            while let Some(result) = connections.join_next().await {
+                result.unwrap();
+            }
+        });
+        Self {
+            endpoint,
+            arrived,
+            release,
+            task,
+        }
+    }
+}
+
+impl Drop for SlowQueries {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn default_capacity_wait_allows_five_slow_queries_without_retained_output() {
+    let mut server = SlowQueries::new(5, false).await;
+    let client = AntalyaClient::new(Config::new(
+        server.endpoint.clone(),
+        Credentials::bearer("token").unwrap(),
+    ))
+    .unwrap();
+    let mut readers = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let mut execution = client.fetch_arrow(query()).await.unwrap();
+        readers.spawn(async move {
+            execution
+                .next_provisional_batch()
+                .await
+                .unwrap()
+                .unwrap()
+                .num_rows()
+        });
+    }
+    for _ in 0..4 {
+        tokio::time::timeout(Duration::from_secs(3), server.arrived.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    // Four full 16 MiB reservations now occupy the default 64 MiB pool.
+    let mut fifth = client.fetch_arrow(query()).await.unwrap();
+    let next = fifth.next_provisional_batch();
+    tokio::pin!(next);
+    tokio::select! {
+        result = &mut next => panic!("peer network waits must not exhaust the retention timeout: {result:?}"),
+        () = tokio::time::sleep(Duration::from_millis(1200)) => {}
+    }
+    server.release.send(true).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), next)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .num_rows(),
+        2
+    );
+    while let Some(result) = readers.join_next().await {
+        assert_eq!(result.unwrap(), 2);
+    }
+    server.arrived.recv().await.unwrap();
+    (&mut server.task).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_raw_reads_release_reservations_before_switching_to_ipc() {
+    use antalya_rs::{AuthorizationContext, AuthorizedRequest, Format};
+    let mut server = SlowQueries::new(4, true).await;
+    let client = AntalyaClient::new(
+        Config::new(
+            server.endpoint.clone(),
+            Credentials::bearer("token").unwrap(),
+        )
+        .resources(ResourceLimits {
+            max_retained_bytes: 3 * 64 * 1024 + 8,
+            ..ResourceLimits::default()
+        })
+        .execution_limits(ExecutionLimits {
+            max_batch_bytes: 64 * 1024,
+            ..ExecutionLimits::default()
+        }),
+    )
+    .unwrap();
+    let mut readers = Vec::new();
+    for _ in 0..2 {
+        let request = AuthorizedRequest::new(
+            query(),
+            server.endpoint.clone(),
+            Format::ArrowStream,
+            AuthorizationContext {
+                receipt_id: "switch".into(),
+                expected_principal: "fixture".into(),
+            },
+        )
+        .unwrap();
+        let mut raw = client
+            .prepare_authorized_arrow(request)
+            .await
+            .unwrap()
+            .ready_transport()
+            .await
+            .unwrap()
+            .admit()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), raw.next_chunk())
+                .await
+                .is_err()
+        );
+        server.arrived.recv().await.unwrap();
+        readers.push(raw);
+    }
+    // Each cancelled raw poll holds a wire allowance. Keeping both while asking
+    // for full IPC frames would leave neither reader able to make progress.
+    let mut readers: Vec<_> = readers
+        .into_iter()
+        .map(|raw| raw.into_ipc().unwrap())
+        .collect();
+    server.release.send(true).unwrap();
+    for reader in &mut readers {
+        let drain = async {
+            let mut frames = 0;
+            while reader.next_frame().await.unwrap().is_some() {
+                frames += 1;
+            }
+            frames
+        };
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), drain)
+                .await
+                .expect("conversion must release raw reservations before acquiring a frame"),
+            2
+        );
+    }
+    (&mut server.task).await.unwrap();
+}

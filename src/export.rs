@@ -320,7 +320,7 @@ impl AntalyaClient {
                 }
                 for piece in chunk.chunks(chunk_size) {
                     let queued = Instant::now();
-                    let lease = self.resources.reserve_bytes(piece.len(), deadline).await?;
+                    let lease = self.resources.reserve_active(piece.len(), deadline).await?;
                     // Acquire before making the independent copy: slicing Bytes
                     // would retain its potentially much larger original allocation.
                     send(
@@ -341,7 +341,7 @@ impl AntalyaClient {
             let queued = Instant::now();
             let lease = self
                 .resources
-                .reserve_bytes(self.config.execution_limits.max_batch_bytes, deadline)
+                .reserve_active(self.config.execution_limits.max_batch_bytes, deadline)
                 .await?;
             let (reply, response) = oneshot::channel();
             send(&sender, Work::Validate { lease, reply }, deadline).await?;

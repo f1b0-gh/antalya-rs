@@ -390,7 +390,7 @@ impl AdmittedResponse {
                     .reserve_internal(self.chunk_limit, true, deadline)
                     .await?
             } else {
-                resources.reserve_bytes(self.chunk_limit, deadline).await?
+                resources.reserve_active(self.chunk_limit, deadline).await?
             });
         }
         if let Some(response) = &mut self.response {
@@ -422,6 +422,9 @@ impl AdmittedResponse {
                 let bytes = self.pending.split_to(count);
                 let mut lease = self.reservation.take().ok_or(TransportError::Poisoned)?;
                 drop(lease.split(lease.num_permits().saturating_sub(count)));
+                if !internal {
+                    lease.make_external();
+                }
                 return Ok(Some(ResponseChunk {
                     bytes: Arc::from(bytes.as_ref()),
                     lease: Arc::new(lease),

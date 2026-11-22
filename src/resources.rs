@@ -96,12 +96,25 @@ impl Resources {
         self.retained_capacity
     }
 
+    #[cfg(test)]
     pub(crate) async fn reserve_bytes(
         &self,
         bytes: usize,
         deadline: Instant,
     ) -> Result<ByteLease, Error> {
-        self.bytes.reserve(bytes, false, false, deadline).await
+        self.bytes
+            .reserve(bytes, bytes::Ownership::External, false, deadline)
+            .await
+    }
+
+    pub(crate) async fn reserve_active(
+        &self,
+        bytes: usize,
+        deadline: Instant,
+    ) -> Result<ByteLease, Error> {
+        self.bytes
+            .reserve(bytes, bytes::Ownership::Active, false, deadline)
+            .await
     }
 
     pub(crate) async fn reserve_internal(
@@ -111,7 +124,7 @@ impl Resources {
         deadline: Instant,
     ) -> Result<ByteLease, Error> {
         self.bytes
-            .reserve(bytes, true, holds_internal, deadline)
+            .reserve(bytes, bytes::Ownership::Internal, holds_internal, deadline)
             .await
     }
 }
