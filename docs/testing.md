@@ -15,7 +15,7 @@ cargo test --locked --no-default-features
 cargo test --locked --no-default-features --features tls
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
-cargo publish --dry-run --locked --all-features
+cargo package --locked --all-features
 ```
 
 The tests exercise request construction, bearer handling, typed parameters,
@@ -26,7 +26,7 @@ and run separately; a successful default test run does not execute them.
 
 The [GitHub Actions workflow](../.github/workflows/ci.yml) defines the four feature
 combinations above, formatting, strict Clippy, rustdoc, package-content checks,
-and a publish dry run that builds from the packaged files without uploading,
+and a package build that compiles the archived source,
 and separate query-log and framed server jobs. The query-log job also runs the
 admitted transport, IPC, Arrow decoder and prepared-command live tests. Both
 server jobs run the restrictive-user and Catalog deployment qualification.
@@ -34,8 +34,11 @@ CI runs on pushes to `main`, pull requests, and manual dispatch.
 See the [Actions runs](https://github.com/f1b0-gh/antalya-rs/actions/workflows/ci.yml)
 for executed results.
 
-The publish dry run requires a clean working tree and registry access. It verifies
+Package verification requires a clean working tree and registry access. It verifies
 the archive's build, while the feature matrix and server jobs exercise behavior.
+Before publishing a new version, also run
+`cargo publish --dry-run --locked --all-features`. CI uses `cargo package` so it
+can verify an already-published version without registry duplicate-version warnings.
 The docs.rs build enables all features, including TLS.
 
 ## Arrow compatibility
