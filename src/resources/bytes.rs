@@ -82,16 +82,13 @@ impl BytePool {
             return Err(Error::at(Phase::Queue, Cause::LimitExceeded));
         }
         let mut retention_deadline = None;
-        let mut waited = false;
         loop {
             // Register before examining accounting to avoid a release between
             // the check and registration becoming a lost wakeup.
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if waited && Instant::now() >= deadline {
-                return Err(Error::at(Phase::Queue, Cause::CapacityTimeout));
-            }
+            super::check_deadline(deadline)?;
             let mut wait_deadline = deadline;
             let lease = {
                 let mut state = self.state();
@@ -122,7 +119,8 @@ impl BytePool {
                             };
                             retention_deadline = Some(until);
                             wait_deadline = deadline.min(until);
-                            if Instant::now() >= wait_deadline {
+                            if Instant::now() >= until {
+                                super::check_deadline(deadline)?;
                                 return Err(Error::at(Phase::Queue, Cause::CapacityTimeout));
                             }
                         }
@@ -133,21 +131,11 @@ impl BytePool {
                 }
             };
             if let Some(lease) = lease {
-                if Instant::now() >= deadline {
-                    return Err(Error::at(
-                        Phase::Queue,
-                        if waited {
-                            Cause::CapacityTimeout
-                        } else {
-                            Cause::Timeout
-                        },
-                    ));
-                }
+                super::check_deadline(deadline)?;
                 // New internal ownership can make another nested wait impossible.
                 self.changed.notify_waiters();
                 return Ok(lease);
             }
-            waited = true;
             // Recheck ownership even on timeout: output may have been released
             // while the timer and notification became ready together.
             let _ = tokio::time::timeout_at(wait_deadline, changed).await;
@@ -329,8 +317,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(Instant::now() >= until);
-        assert_eq!(error.cause(), Some(Cause::CapacityTimeout));
+        assert_eq!(error.cause(), Some(Cause::Timeout));
+        assert_eq!(error.kind(), crate::ErrorKind::Timeout);
+        assert_eq!(error.phase(), Some(Phase::Queue));
         drop(active);
+        assert_eq!(pool.state().available, 8);
+    }
+
+    #[tokio::test]
+    async fn operation_deadline_precedes_a_longer_retention_wait_budget() {
+        for wait in [None, Some(Duration::from_secs(1))] {
+            let pool = BytePool::with_wait_timeout(8, wait);
+            let retained = pool
+                .reserve(8, Ownership::External, false, deadline())
+                .await
+                .unwrap();
+            let until = Instant::now() + Duration::from_millis(20);
+            let error = pool
+                .reserve(8, Ownership::Active, false, until)
+                .await
+                .unwrap_err();
+            assert!(Instant::now() >= until);
+            assert_eq!(error.cause(), Some(Cause::Timeout));
+            assert_eq!(error.kind(), crate::ErrorKind::Timeout);
+            drop(retained);
+            assert_eq!(pool.state().available, 8);
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_deadline_wins_when_both_timers_expire_before_repoll() {
+        let pool = BytePool::with_wait_timeout(8, Some(Duration::from_millis(50)));
+        let retained = pool
+            .reserve(8, Ownership::External, false, deadline())
+            .await
+            .unwrap();
+        let until = Instant::now() + Duration::from_millis(150);
+        let mut waiting = Box::pin(pool.reserve(8, Ownership::Active, false, until));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        tokio::time::sleep_until(until + Duration::from_millis(1)).await;
+        assert_eq!(waiting.await.unwrap_err().cause(), Some(Cause::Timeout));
+        drop(retained);
         assert_eq!(pool.state().available, 8);
     }
 

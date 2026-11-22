@@ -24,12 +24,15 @@ impl Default for PoolOptions {
 /// Shared limits across every clone of a client. Queue capacity is per lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResourceLimits {
+    /// Maximum admitted query lifetimes, independently of byte capacity.
+    /// Defaults admit 16 queries but fund four pending high-level batch reads.
     pub max_active_queries: usize,
     /// Zero refuses an operation immediately when its lane is full.
     pub max_queued_queries: usize,
     pub max_control_queries: usize,
     pub max_export_tasks: usize,
-    /// Accounts retained client buffers, not decoder allocations or process RSS.
+    /// Shared budget for pending read reservations, retained output and export buffers.
+    /// Tune together with `ExecutionLimits::max_batch_bytes` and `max_active_queries`.
     pub max_retained_bytes: usize,
 }
 impl Default for ResourceLimits {
@@ -73,6 +76,7 @@ pub struct ExecutionLimits {
     pub max_total_bytes: u64,
     /// Allocation capacities deduplicated within a batch, plus conservative
     /// array metadata. Independently retained batches are charged separately.
+    /// High-level reads reserve this amount before polling the network.
     pub max_batch_bytes: usize,
 }
 impl Default for ExecutionLimits {
