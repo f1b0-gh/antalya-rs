@@ -33,7 +33,7 @@ impl FramedSource {
         );
         query.settings.insert(
             "output_format_arrow_compression_method".into(),
-            "none".into(),
+            client.config.arrow_compression.setting().into(),
         );
         query
             .settings

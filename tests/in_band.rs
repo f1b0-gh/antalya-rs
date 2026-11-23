@@ -332,13 +332,56 @@ async fn native_framed_empty_rows_late_exception_and_read_denial()
 
 #[tokio::test]
 async fn cancelled_header_and_partial_packet_polls_resume_the_same_request() {
-    for pause_before_headers in [true, false] {
+    for (pause_before_headers, compression, partial_ipc) in [
+        (true, antalya_rs::ArrowCompression::None, false),
+        (false, antalya_rs::ArrowCompression::None, false),
+        (true, antalya_rs::ArrowCompression::Zstd, false),
+        (false, antalya_rs::ArrowCompression::Zstd, false),
+        (false, antalya_rs::ArrowCompression::Zstd, true),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint =
             Endpoint::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let body = packet_stream(2, 1);
+        let (body, pause_at) = if partial_ipc {
+            let batch = arrow_ipc::reader::StreamReader::try_new(
+                std::io::Cursor::new(support::stream(1)),
+                None,
+            )
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+            let mut ipc = Vec::new();
+            let options = arrow_ipc::writer::IpcWriteOptions::default()
+                .try_with_compression(Some(arrow_ipc::CompressionType::ZSTD))
+                .unwrap();
+            let mut writer = arrow_ipc::writer::StreamWriter::try_new_with_options(
+                &mut ipc,
+                &batch.schema(),
+                options,
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+            drop(writer);
+            // Eight EOS bytes plus four body bytes remain. The first complete
+            // data packet therefore leaves IPC staging waiting inside a body.
+            let split = ipc.len() - 12;
+            let first = format!(
+                "{{\"packet\":\"data\",\"data\":\"{}\"}}\n",
+                STANDARD.encode(&ipc[..split])
+            );
+            let rest = format!(
+                "{{\"packet\":\"data\",\"data\":\"{}\"}}\n{{\"packet\":\"progress\",\"progress\":{{\"result_rows\":\"2\",\"result_bytes\":\"0\"}}}}\n",
+                STANDARD.encode(&ipc[split..])
+            );
+            let pause_at = first.len();
+            ((first + &rest).into_bytes(), pause_at)
+        } else {
+            (packet_stream(2, 1), 7)
+        };
         let worker = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             socket
@@ -352,7 +395,7 @@ async fn cancelled_header_and_partial_packet_polls_resume_the_same_request() {
             );
             if !pause_before_headers {
                 socket.write_all(header.as_bytes()).unwrap();
-                socket.write_all(&body[..7]).unwrap();
+                socket.write_all(&body[..pause_at]).unwrap();
             }
             std::thread::sleep(Duration::from_millis(10));
             entered_tx.send(()).unwrap();
@@ -361,12 +404,13 @@ async fn cancelled_header_and_partial_packet_polls_resume_the_same_request() {
                 socket.write_all(header.as_bytes()).unwrap();
                 socket.write_all(&body).unwrap();
             } else {
-                socket.write_all(&body[7..]).unwrap();
+                socket.write_all(&body[pause_at..]).unwrap();
             }
         });
         let client = AntalyaClient::new(
             Config::new(endpoint, Credentials::bearer("token").unwrap())
                 .timeout(Duration::from_secs(3))
+                .arrow_compression(compression)
                 .terminal_policy(TerminalPolicy {
                     strategy: TerminalStrategy::InBand,
                     ..Default::default()
